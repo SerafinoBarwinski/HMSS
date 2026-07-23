@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
+</head>
+<body>
+
+<video id="player" controls></video>
+
+<script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js"></script>
+
+<script>
+const video = document.getElementById('player');
+
+const videoUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
+
+if (Hls.isSupported()) {
+    const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true
+    });
+
+    hls.loadSource(videoUrl);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        const player = new Plyr(video, {
+            controls: [
+                'play-large',
+                'play',
+                'progress',
+                'current-time',
+                'mute',
+                'volume',
+                'settings',
+                'fullscreen'
+            ],
+            settings: [
+                'quality',
+                'speed'
+            ]
+        });
+    });
+
+} else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = videoUrl;
+
+    const player = new Plyr(video);
+}
+</script>
+
+</body>
+</html>

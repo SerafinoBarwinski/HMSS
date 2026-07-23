@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>HMSS POC · Custom Client</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0a; color: #ccc; font: 14px 'Segoe UI',sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; min-height: 100vh; }
+h1 { color: #00bcd4; margin-bottom: 8px; }
+
+.flow { display: flex; gap: 16px; margin: 16px 0; max-width: 960px; width: 100%; }
+.step { flex: 1; background: #141414; border: 1px solid #2a2a2a; border-radius: 10px; padding: 14px; text-align: center; }
+.step h2 { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px; }
+.step .val { font-size: 13px; color: #aaa; }
+.step.done { border-color: #00c853; } .step.done h2 { color: #00c853; }
+.step.active { border-color: #00bcd4; } .step.fail { border-color: #f44336; } .step.fail h2 { color: #f44336; }
+
+.player-wrap { max-width: 960px; width: 100%; border-radius: 8px; overflow: hidden; margin-top: 12px; position: relative; }
+video { width: 100%; display: block; background: #000; min-height: 200px; }
+
+.custom-controls { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #141414; border: 1px solid #2a2a2a; border-radius: 0 0 8px 8px; max-width: 960px; width: 100%; }
+.custom-controls button { background: none; border: none; color: #ccc; font-size: 16px; cursor: pointer; padding: 4px 8px; border-radius: 4px; }
+.custom-controls button:hover { background: #2a2a2a; color: #00bcd4; }
+.custom-controls span { color: #888; font-size: 12px; min-width: 42px; text-align: center; font-family: monospace; }
+#ctrl-seek { flex: 1; height: 5px; accent-color: #00bcd4; cursor: pointer; }
+#ctrl-volume { width: 80px; height: 4px; accent-color: #00bcd4; cursor: pointer; }
+
+.ctrls { display: flex; gap: 10px; margin-top: 12px; align-items: center; justify-content: center; flex-wrap: wrap; }
+.ctrls button, .ctrls select { background: #1e1e1e; color: #eee; border: 1px solid #333; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.ctrls button:hover { border-color: #00bcd4; }
+.ctrls button:disabled { opacity: 0.3; }
+
+.log { max-width: 960px; width: 100%; margin-top: 12px; font-size: 11px; color: #555; max-height: 60px; overflow-y: auto; font-family: monospace; }
+.log .ok { color: #00c853; } .log .err { color: #f44336; } .log .warn { color: #ff9800; }
+</style>
+</head>
+<body>
+<h1>HMSS · Custom Streaming Client</h1>
+
+<div class="flow">
+    <div class="step" id="s1"><h2>1. Media Info</h2><div class="val">requesting...</div></div>
+    <div class="step" id="s2"><h2>2. Check Playback</h2><div class="val">waiting...</div></div>
+    <div class="step" id="s3"><h2>3. Transcode Options</h2><div class="val">waiting...</div></div>
+    <div class="step" id="s4"><h2>4. Stream</h2><div class="val">waiting...</div></div>
+</div>
+
+<div class="player-wrap"><video id="video" autoplay muted playsinline></video></div>
+
+<div class="custom-controls">
+    <button id="btn-playpause" title="Play/Pause">▶</button>
+    <span id="ctrl-time">0:00</span>
+    <input type="range" id="ctrl-seek" min="0" max="1000" value="0" step="1">
+    <span id="ctrl-duration">0:00</span>
+    <button id="btn-mute" title="Mute">🔊</button>
+    <input type="range" id="ctrl-volume" min="0" max="100" value="100">
+</div>
+
+<div class="ctrls">
+    <select id="quality">
+        <option value="1080p">1080p</option>
+        <option value="720p" selected>720p</option>
+        <option value="480p">480p</option>
+        <option value="360p">360p</option>
+    </select>
+    <label style="display:flex;align-items:center;gap:6px;color:#888;font-size:12px;cursor:pointer">
+        <input type="checkbox" id="force-transcode"> Force Transcode
+    </label>
+    <button id="btn-play" disabled>Play</button>
+</div>
+
+<div class="log" id="log"></div>
+
+<script>
+const video = document.getElementById("video");
+const logEl = document.getElementById("log");
+const btnPlay = document.getElementById("btn-play");
+const btnPlayPause = document.getElementById("btn-playpause");
+const ctrlSeek = document.getElementById("ctrl-seek");
+const ctrlTime = document.getElementById("ctrl-time");
+const ctrlDuration = document.getElementById("ctrl-duration");
+const ctrlVolume = document.getElementById("ctrl-volume");
+const BASE = "";
+
+let mediaInfo = null;
+let chosenFormat = null;
+let isTranscode = false;
+let seekOffset = 0;
+const ITEM_ID = "poc-test-video";
+
+function log(msg, cls = "") { logEl.innerHTML += `<span class="${cls}">${msg}</span><br>`; logEl.scrollTop = logEl.scrollHeight; }
+function step(id, cls) { document.getElementById(id).className = "step " + (cls || ""); }
+function stepVal(id, text) { document.getElementById(id).querySelector(".val").textContent = text; }
+function fmtTime(s) { if (!isFinite(s) || s < 0) return "0:00"; const m = Math.floor(s / 60); const sec = Math.floor(s % 60); return `${m}:${sec.toString().padStart(2, "0")}`; }
+
+// ---- Custom controls ----
+
+btnPlayPause.addEventListener("click", () => {
+    if (video.paused) { video.play(); btnPlayPause.textContent = "⏸"; }
+    else { video.pause(); btnPlayPause.textContent = "▶"; }
+});
+
+video.addEventListener("play", () => { btnPlayPause.textContent = "⏸"; });
+video.addEventListener("pause", () => { btnPlayPause.textContent = "▶"; });
+
+function seekTo(target) {
+    if (!isTranscode) { video.currentTime = target; return; }
+
+    if (video.buffered.length > 0) {
+        for (let i = 0; i < video.buffered.length; i++) {
+            if (target >= video.buffered.start(i) && target <= video.buffered.end(i)) {
+                video.currentTime = target;
+                return;
+            }
+        }
+    }
+
+    seekOffset = target;
+    log(`Seeking to ${fmtTime(target)}...`, "warn");
+
+    const p = document.getElementById("quality").value;
+    const url = `${BASE}/transcode?vc=${chosenFormat.videoCodec}&ac=${chosenFormat.audioCodec}&profile=${p}&ss=${seekOffset}`;
+    video.src = url;
+}
+
+ctrlSeek.addEventListener("input", () => {
+    const d = mediaInfo?.duration || 10;
+    const target = (ctrlSeek.value / 1000) * d;
+    ctrlTime.textContent = fmtTime(target);
+});
+
+ctrlSeek.addEventListener("change", () => {
+    const d = mediaInfo?.duration || 10;
+    const target = (ctrlSeek.value / 1000) * d;
+    seekTo(target);
+});
+
+ctrlVolume.addEventListener("input", () => {
+    video.volume = ctrlVolume.value / 100;
+    video.muted = false;
+    document.getElementById("btn-mute").textContent = video.volume === 0 ? "🔇" : video.volume < 0.5 ? "🔉" : "🔊";
+});
+
+document.getElementById("btn-mute").addEventListener("click", () => {
+    video.muted = !video.muted;
+    document.getElementById("btn-mute").textContent = video.muted ? "🔇" : "🔊";
+    if (!video.muted) video.volume = ctrlVolume.value / 100;
+});
+
+// ---- Playback tracking ----
+
+let trackingInterval = null;
+let progressInterval = null;
+
+video.addEventListener("timeupdate", () => {
+    const t = video.currentTime + seekOffset;
+    const d = (video.duration || 0) + seekOffset;
+    const realDuration = mediaInfo?.duration || d || 1;
+    if (realDuration > 0) {
+        ctrlSeek.value = Math.floor((t / realDuration) * 1000);
+        ctrlTime.textContent = fmtTime(t);
+    }
+});
+
+video.addEventListener("durationchange", () => {
+    const d = mediaInfo?.duration || video.duration || 0;
+    ctrlDuration.textContent = fmtTime(d);
+});
+
+video.addEventListener("ended", () => {
+    clearInterval(progressInterval);
+    progressInterval = null;
+    ctrlSeek.value = 1000;
+    ctrlTime.textContent = ctrlDuration.textContent;
+    btnPlayPause.textContent = "▶";
+    reportProgress((video.duration || 0) + seekOffset);
+});
+
+video.addEventListener("play", () => {
+    progressInterval = setInterval(() => reportProgress(video.currentTime + seekOffset), 5000);
+});
+
+video.addEventListener("pause", () => {
+    clearInterval(progressInterval);
+    progressInterval = null;
+    reportProgress(video.currentTime + seekOffset);
+});
+
+// ---- Progress persistence ----
+
+async function resumePosition() {
+    try {
+        const resp = await fetch(`${BASE}/api/progress/${ITEM_ID}`);
+        const state = await resp.json();
+        if (state.position > 1) {
+            log(`Resume from ${fmtTime(state.position)}`, "ok");
+            video.addEventListener("loadedmetadata", () => { video.currentTime = state.position; }, { once: true });
+        }
+    } catch {}
+}
+
+async function reportProgress(position) {
+    try {
+        await fetch(`${BASE}/api/progress/${ITEM_ID}`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ position }),
+        });
+    } catch {}
+}
+
+// ---- Phase 1: Media Info ----
+
+async function phase1() {
+    step("s1", "active"); stepVal("s1", "probing...");
+    const resp = await fetch(`${BASE}/api/media`);
+    mediaInfo = await resp.json();
+    stepVal("s1", `${mediaInfo.container?.toUpperCase()} · ${mediaInfo.videoCodec?.toUpperCase()}+${mediaInfo.audioCodec?.toUpperCase()} · ${mediaInfo.duration.toFixed(0)}s`);
+    step("s1", "done");
+    ctrlDuration.textContent = fmtTime(mediaInfo.duration || 0);
+    if (mediaInfo.videoWidth && mediaInfo.videoHeight) {
+        video.width = mediaInfo.videoWidth;
+        video.height = mediaInfo.videoHeight;
+    }
+    log(`Media: ${mediaInfo.container} ${mediaInfo.videoWidth}x${mediaInfo.videoHeight} ${mediaInfo.duration.toFixed(1)}s`, "ok");
+}
+
+// ---- Phase 2: Direct Play Check ----
+
+function phase2() {
+    step("s2", "active"); stepVal("s2", "testing...");
+    const vc = mediaInfo.videoCodec;
+    const ac = mediaInfo.audioCodec;
+    const tests = [
+        `video/mp4; codecs="${vc === 'h264' ? 'avc1.42E01E' : vc}, ${ac === 'aac' ? 'mp4a.40.2' : ac}"`,
+        `video/mp4`,
+        `video/${mediaInfo.container}`,
+    ];
+    let canDirect = false;
+    for (const m of tests) {
+        const r = video.canPlayType(m);
+        log(`Direct play check: ${m} → ${r || "no"}`, r ? "ok" : "warn");
+        if (r === "probably" || r === "maybe") { canDirect = true; break; }
+    }
+    if (canDirect) { stepVal("s2", "Direct Play ✓"); step("s2", "done"); return "direct"; }
+    else { stepVal("s2", "Needs transcode"); step("s2", "fail"); return "transcode"; }
+}
+
+// ---- Phase 3: Transcode Options ----
+
+async function phase3() {
+    step("s3", "active"); stepVal("s3", "fetching...");
+    const resp = await fetch(`${BASE}/api/transcode-options`);
+    const options = await resp.json();
+    for (const opt of options) {
+        const r = video.canPlayType(opt.mime);
+        log(`Transcode check: ${opt.videoCodec}/${opt.audioCodec} → ${r || "no"}`, r ? "ok" : "warn");
+        if (r === "probably" || r === "maybe") {
+            chosenFormat = opt;
+            stepVal("s3", `${opt.videoCodec.toUpperCase()}+${opt.audioCodec.toUpperCase()}`);
+            step("s3", "done");
+            return opt;
+        }
+    }
+    stepVal("s3", "none compatible"); step("s3", "fail");
+    return null;
+}
+
+// ---- Phase 4: Stream ----
+
+function phase4() {
+    step("s4", "active");
+    if (!chosenFormat) {
+        isTranscode = false;
+        video.src = `${BASE}/stream`;
+        stepVal("s4", "Direct"); step("s4", "done");
+        log("Direct play started", "ok");
+    } else {
+        isTranscode = true;
+        seekOffset = 0;
+        const p = document.getElementById("quality").value;
+        video.src = `${BASE}/transcode?vc=${chosenFormat.videoCodec}&ac=${chosenFormat.audioCodec}&profile=${p}`;
+        stepVal("s4", "Transcode"); step("s4", "done");
+        log(`Transcoding to ${chosenFormat.videoCodec}/${chosenFormat.audioCodec}`, "ok");
+    }
+    video.addEventListener("loadedmetadata", () => resumePosition(), { once: true });
+}
+
+// ---- Main ----
+
+async function main() {
+    await phase1();
+    const mode = document.getElementById("force-transcode").checked ? "transcode" : phase2();
+    if (mode === "transcode") { const opt = await phase3(); if (!opt) { log("No compatible format found.", "err"); return; } }
+    phase4();
+    btnPlay.disabled = false;
+}
+
+btnPlay.addEventListener("click", main);
+main();
+</script>
+</body>
+</html>

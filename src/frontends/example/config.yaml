@@ -1,0 +1,21 @@
+name: "Sample Design Package"
+description: "The Sample Design Package. It looks like the standard package but can be edited."
+version: "1.1.1" #Can also be used as the version name; however, the default is the version number.
+
+logo: logo.png
+
+author: "Serafino Barwinski"
+license: "The Unlicense"
+license_url: "https://choosealicense.com/licenses/unlicense/"
+
+files:
+- html: main.html
+- css: styles.css
+- js: scripts.js
+# More files can be loaded via HTML or JS.
+
+languages:
+  - lang: en
+    path: lang/en.yaml
+  - lang: de
+    path: lang/de.yaml

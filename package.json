@@ -1,0 +1,24 @@
+{
+  "name": "hmss",
+  "version": "0.0.0",
+  "description": "",
+  "license": "",
+  "author": "Serafino Barwinski",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "server": "node server.js"
+  },
+  "dependencies": {
+    "argon2": "^0.45.0",
+    "better-sqlite3": "^13.0.1",
+    "express": "^5.2.1",
+    "figlet": "^1.11.3",
+    "yaml": "^2.9.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.1": true,
+    "bcrypt@6.0.0": true,
+    "argon2@0.45.0": true
+  }
+}
