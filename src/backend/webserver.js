@@ -1,9 +1,28 @@
+import { getAddons, getAddonsByCapability, searchAll } from "./addon_loader.js";
+
 export async function hmssRoutes(app) {
 
 }
 
 export async function addonRoutes(app) {
-    
+    app.get("/api/addons", (req, res) => {
+        res.json(getAddons().map(a => ({
+            id: a.id,
+            name: a.name,
+            version: a.version,
+            description: a.description,
+            capabilities: a.capabilities,
+            configSchema: a.configSchema,
+            configured: Object.values(a.config).some(v => v),
+        })));
+    });
+
+    app.get("/api/addons/search", async (req, res) => {
+        const { query, type, year } = req.query;
+        if (!query) return res.status(400).json({ error: "query required" });
+        const results = await searchAll({ query, year, type });
+        res.json(results);
+    });
 }
 
 export async function jellyfinRoutes(app) {

@@ -1,0 +1,14 @@
+{
+  "api_key": {
+    "type": "string",
+    "label": "TMDB API Key",
+    "default": "",
+    "required": true
+  },
+  "language": {
+    "type": "enum",
+    "label": "Language",
+    "default": "en",
+    "options": ["de", "en", "fr", "es"]
+  }
+}

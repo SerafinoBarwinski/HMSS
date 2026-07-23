@@ -1,6 +1,6 @@
 import * as sql from "./sql.js";
 import * as fs from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, existsSync} from "node:fs";
 import * as path from "node:path";
 import * as net from "node:net";
 import { spawn } from "node:child_process";
@@ -55,7 +55,9 @@ export async function filesystemPermissionsTest(failedModules, mediaDirs) {
 }
 
 export async function ensureDir(dir, failedModules) {
+    if (existsSync(dir)) return;
     try {
+        console.log(`Media folder ${dir} is being created.`)
         await fs.mkdir(dir, { recursive: true });
     } catch {
         failedModules.push(`Cannot create directory: ${dir}`);
