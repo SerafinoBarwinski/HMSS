@@ -1,0 +1,6 @@
+name: TMDB
+version: "1.0"
+description: "Metadata provider using TheMovieDB API"
+capabilities:
+  - metadata
+  - search

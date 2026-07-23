@@ -8,7 +8,7 @@ media/music/$artist/$album/$song
 media/shows/$show/$episode
 
 # Tuner
-media/tuner/$tuner/$channel
+Virtual Directory.
 
 # Database and Meta
 In every content folder (e.g. media/shows/rickandmorty/S1E1/) is a meta.yaml file which provides the Metadata.
