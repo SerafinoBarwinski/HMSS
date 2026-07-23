@@ -1,0 +1,7 @@
+name: Fanart.tv
+version: "1.0"
+description: "Downloads posters, hero images and backgrounds from Fanart.tv"
+capabilities:
+  - artwork
+dependency:
+  - tmdb

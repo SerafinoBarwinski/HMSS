@@ -16,6 +16,6 @@ files:
 
 languages:
   - lang: en
-    path: lang/en.yaml
+    path: lang/en.json
   - lang: de
-    path: lang/de.yaml
+    path: lang/de.json

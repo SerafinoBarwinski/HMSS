@@ -69,10 +69,23 @@ export async function loadAddons(userConfig = {}) {
             version: manifest.version || "0.0.0",
             description: manifest.description || "",
             capabilities: manifest.capabilities || [],
+            dependency: manifest.dependency || [],
             module,
             config,
             configSchema,
         });
+    }
+
+    // check dependencies — remove addons with missing deps
+    const addonIds = new Set(addons.map(a => a.id));
+    for (let i = addons.length - 1; i >= 0; i--) {
+        for (const dep of addons[i].dependency) {
+            if (!addonIds.has(dep)) {
+                console.warn(`Addon '${addons[i].id}': missing dependency '${dep}' — skipped`);
+                addons.splice(i, 1);
+                break;
+            }
+        }
     }
 
     initialized = true;
