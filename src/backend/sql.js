@@ -1,9 +1,14 @@
+import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import os from "node:os";
+
 export async function init(rootPsw, db, argon2) {
     if (!db || !argon2) return { succes: false, reason: "One of the modules is missing or null.", code: 5 };
     // Make User DB
     db.exec(`
         create table if not exists "users" (
             "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+            "uuid" TEXT,
             "created_at" TEXT not null default CURRENT_TIMESTAMP,
             "created_by" TEXT not null default 'SYSTEM',
             "name" varchar(50) not null,
@@ -15,7 +20,30 @@ export async function init(rootPsw, db, argon2) {
             "max_video_bitrate" INT not null default 20000000,
             "allow_hdr" BOOLEAN not null default true
         );
-    `);
+
+        create table if not exists "sessions" (
+            "token" TEXT PRIMARY KEY,
+            "user_id" INTEGER not null,
+            "created_at" TEXT not null default CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        create table if not exists "system" (
+            "id" TEXT PRIMARY KEY,
+            "server_name" TEXT not null,
+            "product_name" TEXT not null,
+            "startup_wizard_completed" BOOLEAN not null default false
+        );
+    `); // PERMS: 0 - 3; where 3 is root and 2 admin. 1 manager and 0 visitor
+
+    // add uuid column to existing tables (harmless if already exists)
+    try { db.exec("ALTER TABLE users ADD COLUMN uuid TEXT"); } catch {}
+
+    // migrate: add UUID to existing users that don't have one
+    const missingUuid = db.prepare("SELECT id FROM users WHERE uuid IS NULL").all();
+    for (const row of missingUuid) {
+        db.prepare("UPDATE users SET uuid = ? WHERE id = ?").run(randomUUID(), row.id);
+    }
 
     const rootUser = db
         .prepare("SELECT id FROM users WHERE name = ?")
@@ -29,11 +57,19 @@ export async function init(rootPsw, db, argon2) {
         });
 
         db.prepare(`
-            INSERT INTO users (name, password_hash, perms)
-            VALUES (?, ?, ?)
-        `).run("root", passwordHash, 3);
+            INSERT INTO users (name, password_hash, perms, uuid)
+            VALUES (?, ?, ?, ?)
+        `).run("root", passwordHash, 3, randomUUID());
 
         console.log("Root user created.");
+    }
+
+    const systemRow = db.prepare("SELECT id FROM system").get();
+    if (!systemRow) {
+        const id = randomBytes(16).toString("hex");
+        db.prepare("INSERT INTO system (id, server_name, product_name) VALUES (?, ?, ?)")
+            .run(id, os.hostname(), "Jellyfin Server");
+        console.log("System row created:", id);
     }
 
     return { succes: true, reason: null, code: 0 };
@@ -202,7 +238,8 @@ export async function addUser(
         max_video_width,
         max_video_height,
         max_video_bitrate,
-        allow_hdr
+        allow_hdr,
+        uuid: randomUUID()
     };
 
     // Removes undefined values ​​so that SQL defaults apply.
@@ -224,4 +261,71 @@ export async function addUser(
         userId,
         code: 0
     };
+}
+
+export async function loginUser(name, password, db, argon2) {
+    if (!name || !password || !db || !argon2) {
+        return { success: false, reason: "Missing credentials.", code: 4 };
+    }
+
+    const user = db.prepare("SELECT * FROM users WHERE name = ?").get(name);
+    if (!user) {
+        return { success: false, reason: "Invalid username or password.", code: 10 };
+    }
+
+    const valid = await argon2.verify(user.password_hash, password);
+    if (!valid) {
+        return { success: false, reason: "Invalid username or password.", code: 10 };
+    }
+
+    // generate session token
+    const token = crypto.randomUUID();
+    db.prepare("INSERT INTO sessions (token, user_id) VALUES (?, ?)").run(token, user.id);
+
+    console.log(`User '${name}' logged in.`);
+
+    return {
+        success: true,
+        code: 0,
+        user: {
+            id: String(user.id),
+            uuid: user.uuid,
+            name: user.name,
+            perms: user.perms,
+            logo_path: user.logo_path,
+            max_video_width: user.max_video_width,
+            max_video_height: user.max_video_height,
+            max_video_bitrate: user.max_video_bitrate,
+            allow_hdr: Boolean(user.allow_hdr),
+        },
+        accessToken: token,
+    };
+}
+
+export function validateToken(token, db) {
+    if (!token || !db) return null;
+
+    const session = db.prepare(`
+        SELECT users.* FROM sessions
+        JOIN users ON users.id = sessions.user_id
+        WHERE sessions.token = ?
+    `).get(token);
+
+    if (!session) return null;
+
+    return {
+        id: String(session.id),
+        uuid: session.uuid,
+        name: session.name,
+        perms: session.perms,
+    };
+}
+
+export function logoutToken(token, db) {
+    if (!token || !db) return;
+    db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+}
+
+export function getSystemInfo(db) {
+    return db.prepare("SELECT * FROM system").get();
 }

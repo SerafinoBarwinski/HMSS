@@ -1,0 +1,26 @@
+{
+  "api_key": {
+    "type": "string",
+    "default": "",
+    "label": "Fanart.tv API Key",
+    "required": true
+  },
+  "key_type": {
+    "type": "string",
+    "default": "personal",
+    "label": "Key Type",
+    "options": ["personal", "project"]
+  },
+  "poster_size": {
+    "type": "string",
+    "default": "medium",
+    "label": "Poster Size",
+    "options": ["small", "medium", "large"]
+  },
+  "background_size": {
+    "type": "string",
+    "default": "large",
+    "label": "Background/Hero Size",
+    "options": ["small", "medium", "large"]
+  }
+}

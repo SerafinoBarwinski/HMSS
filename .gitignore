@@ -3,3 +3,5 @@
 *.log
 *stream_tmp*
 /media/*
+*override.json
+!override.json.example

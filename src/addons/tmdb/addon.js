@@ -1,5 +1,5 @@
-// TMDB Metadata Addon
-// https://developer.themoviedb.org/reference/intro/getting-started
+// TMDB Metadata Addon v1.1
+// Supports API v3 key and v4 access token (Bearer auth)
 
 const BASE = "https://api.themoviedb.org/3";
 
@@ -11,15 +11,28 @@ export async function init(config) {
     language = config.language || "en";
 }
 
+function authHeaders() {
+    return apiKey.length > 60
+        ? { Authorization: `Bearer ${apiKey}` }
+        : {};
+}
+
+function authParam() {
+    return apiKey.length > 60 ? "" : `&api_key=${apiKey}`;
+}
+
 export async function search({ query, year, type }) {
     if (!apiKey) throw new Error("TMDB API key not configured");
 
     const mediaType = type === "show" || type === "series" ? "tv" : "movie";
-    const params = new URLSearchParams({ api_key: apiKey, query, language });
-    if (year) params.set("first_air_date_year", year);
-    if (year && mediaType === "movie") params.set("year", year);
+    const params = new URLSearchParams({ query, language });
+    if (year) {
+        if (mediaType === "movie") params.set("year", year);
+        else params.set("first_air_date_year", year);
+    }
 
-    const resp = await fetch(`${BASE}/search/${mediaType}?${params}`);
+    const url = `${BASE}/search/${mediaType}?${params}${authParam()}`;
+    const resp = await fetch(url, { headers: authHeaders() });
     if (!resp.ok) throw new Error(`TMDB search failed: ${resp.status}`);
 
     const data = await resp.json();
@@ -35,18 +48,16 @@ export async function search({ query, year, type }) {
     }));
 }
 
-export async function identify({ filename, ffprobe }) {
+export async function identify({ filename, ffprobe, type }) {
     if (!apiKey) return null;
 
-    // try embedded title first
     let query = "";
     if (ffprobe?.tags?.title) query = ffprobe.tags.title;
     else query = sanitizeFilename(filename);
 
-    const results = await search({ query });
+    const results = await search({ query, type });
     if (results.length === 0) return null;
 
-    // cross-reference with duration if available
     if (ffprobe?.duration && results.length > 1) {
         const match = await bestDurationMatch(results[0].id, ffprobe.duration);
         if (match) return match;
@@ -55,9 +66,23 @@ export async function identify({ filename, ffprobe }) {
     return { ...results[0], confidence: results.length === 1 ? 0.9 : 0.7 };
 }
 
+export async function getExternalIds(tmdbId, type) {
+    if (!apiKey) return null;
+    const mediaType = type === "show" || type === "series" ? "tv" : "movie";
+    const url = `${BASE}/${mediaType}/${tmdbId}/external_ids?language=${language}${authParam()}`;
+    const resp = await fetch(url, { headers: authHeaders() });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return {
+        imdb_id: data.imdb_id,
+        tvdb_id: data.tvdb_id ? String(data.tvdb_id) : null,
+    };
+}
+
 async function bestDurationMatch(tmdbId, fileDuration) {
     try {
-        const resp = await fetch(`${BASE}/movie/${tmdbId}?api_key=${apiKey}&language=${language}`);
+        const url = `${BASE}/movie/${tmdbId}?language=${language}${authParam()}`;
+        const resp = await fetch(url, { headers: authHeaders() });
         if (!resp.ok) return null;
         const data = await resp.json();
         if (data.runtime && Math.abs(data.runtime * 60 - fileDuration) < 300) {
