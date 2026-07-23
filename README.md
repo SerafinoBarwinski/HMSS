@@ -14,7 +14,7 @@ slow to fix issues that matter to self-hosters.
 
 HMSS takes a different approach: a fresh codebase in Node.js, designed to be
 easy to read, easy to modify, and easy to run. It speaks the Jellyfin API so
-your favourite clients (Findroid, Jellyfin Mobile, Swiftfin) just work — but
+your favourite clients (Findroid, Jellyfin Mobile, etc) just work — but
 the server itself is ours from top to bottom.
 
 ## Requirements
