@@ -16,7 +16,7 @@ slow to fix issues that matter to self-hosters.
 HMSS takes a different approach: a fresh codebase in Node.js, designed to be
 easy to read, easy to modify, and easy to run. It speaks the Jellyfin API so
 your favourite clients (Findroid, Jellyfin Mobile, etc) just work — but
-the server itself is ours from top to bottom.
+the server itself is diffrent from top to bottom.
 
 ## Requirements
 
@@ -27,13 +27,21 @@ the server itself is ours from top to bottom.
 
 That's it. No Docker required (but it runs fine in one).
 
+## Optional
+
+- **[Telerising API](https://github.com/sunsettrack4/telerising-api)** — LiveTV
+  integration. Provides IPTV channel streaming through various providers.
+  Place the ZIP Content at `src/telerising` and configure via the web dashboard.
+  Then under **Live TV → Tuner Hosts** (type: M3U, URL:
+  `http://localhost:5000/api/{provider}/live/channels.m3u?ffmpeg=true`).
+
 ## Quick Start
 
 ```bash
 git clone https://github.com/SerafinoBarwinski/HMSS.git
 cd HMSS
 npm install
-npm run server
+npm start
 ```
 
 The server starts on port 8000. Open `http://localhost:8000` in a browser or
@@ -87,14 +95,14 @@ and posters from TMDB and Fanart.tv.
 ## What Works
 
 - **Authentication**: Password login, Quick Connect, Setup Wizard, sessions
-- **User Management**: Add/edit/remove users, profile pictures, permission system
 - **Media Browsing**: Full Jellyfin-compatible item listing, filtering, suggestions
 - **Media Playback**: Direct play streaming with Range support (seeking works)
+- **Live TV**: Telerising IPTV integration — channel listing, HLS proxy streaming, channel logos
 - **Metadata Enrichment**: TMDB (movies/shows), MusicBrainz (music), Fanart.tv (artwork)
 - **Addons**: Plugin system with config UI in Jellyfin Web Dashboard
 - **Media Scanning**: Threaded background scanning with metadata extraction (ffprobe)
 - **jellyfin-web**: Full web UI hosted, works with Jellyfin Mobile app
-- **Discovery**: mDNS/UDP on port 7359, WebSocket for real-time updates
+- **Discovery**: UDP on port 7359, WebSocket for real-time updates
 - **Localization**: Languages, cultures, countries served from API
 - **System Info**: Server info, ping, logging, activity log, disk stats
 - **Rate Limiting**: Per-IP request throttling, localhost exempt
@@ -102,22 +110,17 @@ and posters from TMDB and Fanart.tv.
 
 ## What's Next
 
-- Transcoding support
-- Subtitle management
-- Live TV support
-- SyncPlay
-- Web-based admin dashboard enhancements
 - HMSS-native frontend
+- XMLTV / EPG guide data
 
 ## API Compatibility
 
 HMSS implements a large subset of the Jellyfin API. Most endpoints used by
-Jellyfin Mobile, Findroid, and other clients are functional. See
-`docs/jellyfin_compat.md` for details on client compatibility requirements
-(UUID formats, field ordering, header quirks).
+Jellyfin Mobile, and other clients are functional.
 
-HMSS is not affiliated with or endorsed by the Jellyfin project. We implement
-API compatibility to leverage the existing ecosystem of clients.
+
+**HMSS is not affiliated with or endorsed by the Jellyfin project. We implement
+API compatibility to leverage the existing ecosystem of clients.**
 
 ## License
 

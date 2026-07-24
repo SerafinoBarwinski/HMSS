@@ -5,10 +5,18 @@ import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, readMetaF
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { getItemMeta } from "./meta_reader.js";
 import { readFile, writeFile } from "node:fs/promises";
+import { killTelerisingProcess } from "./telerising.js";
 import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream } from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+
+let _liveTvCache = { channels: [], ts: 0 };
+function findLiveTvChannel(itemId) {
+    return _liveTvCache.channels.find(c => c.Id === itemId) || null;
+}
 
 export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     app.use(authMiddleware(getDb));
@@ -155,6 +163,9 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         if (!filePath) for (const m of index.music || []) {
             if (generateItemId(m.id || m.filePath) === rawId) { filePath = m.filePath; break; }
         }
+        if (!filePath) for (const u of index.unsorted || []) {
+            if (generateItemId(u.id || u.filePath) === rawId) { filePath = u.filePath; break; }
+        }
         if (!filePath) return res.json([]);
 
         const poster = findPosterPath(filePath);
@@ -298,17 +309,42 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
     function serveItemImage(req, res, imageType) {
         const rawId = (req.params.itemId || "").replace(/-/g, "");
+
+        // LiveTV channel logo proxy
+        const tvChannel = findLiveTvChannel(rawId);
+        if (tvChannel && tvChannel.LogoUrl) {
+            const logoUrl = tvChannel.LogoUrl;
+            const client = logoUrl.startsWith("https") ? https : http;
+            return client.get(logoUrl, { timeout: 8000 }, (upstream) => {
+                if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
+                    const redir = upstream.headers.location;
+                    const rp = redir.startsWith("https") ? https : http;
+                    return rp.get(redir, { timeout: 8000 }, (r2) => {
+                        res.set("Content-Type", r2.headers["content-type"] || "image/png");
+                        r2.pipe(res);
+                    }).on("error", () => res.status(404).end());
+                }
+                res.set("Content-Type", upstream.headers["content-type"] || "image/png");
+                upstream.pipe(res);
+            }).on("error", () => res.status(404).end());
+        }
+
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
         let filePath = null;
         for (const ep of index.shows || []) {
             if (generateItemId(ep.id || ep.filePath) === rawId) { filePath = ep.filePath; break; }
             if (generateItemId(ep.showName) === rawId) { filePath = ep.filePath; break; }
+            const seasonId = generateItemId(`${ep.showName}-s${ep.season}`);
+            if (seasonId === rawId) { filePath = ep.filePath; break; }
         }
         if (!filePath) for (const m of index.movies || []) {
             if (generateItemId(m.id || m.filePath) === rawId) { filePath = m.filePath; break; }
         }
         if (!filePath) for (const m of index.music || []) {
             if (generateItemId(m.id || m.filePath) === rawId) { filePath = m.filePath; break; }
+        }
+        if (!filePath) for (const u of index.unsorted || []) {
+            if (generateItemId(u.id || u.filePath) === rawId) { filePath = u.filePath; break; }
         }
         if (!filePath) return res.status(404).end();
 
@@ -346,6 +382,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         if (!req.user || req.user.perms < 2) return res.status(401).end();
         const db = getDb();
         const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
         res.json({
             LogFileRetentionDays: 7,
             IsStartupWizardCompleted: sys ? Boolean(sys.startup_wizard_completed) : false,
@@ -364,17 +402,23 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             EnableGroupingShowsIntoCollections: false,
             EnableLegacyAuthorization: false,
             ActivityLogRetentionDays: 30,
+            ...stored,
         });
     });
 
     app.post("/System/Configuration", (req, res) => {
         if (!req.user || req.user.perms < 2) return res.status(401).end();
         const db = getDb();
-        const { ServerName, UICulture } = req.body || {};
-        if (ServerName) {
-            db.prepare("UPDATE system SET server_name = ?").run(ServerName);
+        const body = req.body || {};
+        if (body.ServerName) {
+            db.prepare("UPDATE system SET server_name = ?").run(body.ServerName);
         }
-        res.status(200).end();
+        const sys = getSystemInfo(db);
+        let existing = {};
+        try { existing = JSON.parse(sys?.config_json || "{}"); } catch {}
+        Object.assign(existing, body);
+        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(existing));
+        res.status(204).end();
     });
 
     app.get("/System/Info/Storage", (req, res) => {
@@ -562,6 +606,20 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 });
             }
         }
+        const db = getDb();
+        const ltConfig = (() => { try { return JSON.parse((getSystemInfo(db)?.config_json || "{}")).livetv; } catch { return null; } })();
+        if (ltConfig?.TunerHosts?.length > 0) {
+            result.push({
+                Name: "Live TV",
+                Locations: [],
+                CollectionType: "livetv",
+                LibraryOptions: { Enabled: true },
+                ItemId: "livetv",
+                PrimaryImageItemId: null,
+                RefreshProgress: 0,
+                RefreshStatus: "Idle",
+            });
+        }
         res.json(result);
     });
 
@@ -589,6 +647,45 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             req.params.itemId = collectionType;
             return serveItemDetail(req, res, getDb());
         }
+
+        if (collectionType === "livetv") {
+            const db = getDb();
+            const ltConfig = (() => { try { return JSON.parse((getSystemInfo(db)?.config_json || "{}")).livetv; } catch { return null; } })();
+            if (!ltConfig?.TunerHosts?.length) return res.status(404).json({ error: "Collection not found." });
+            const sys = getSystemInfo(db);
+            const serverId = sys?.id || "hmss-local";
+            const itemId = "livetv";
+            return res.json({
+                Name: "Live TV",
+                ServerId: serverId,
+                Id: itemId,
+                DateCreated: new Date().toISOString(),
+                CanDelete: false,
+                CanDownload: false,
+                SortName: "livetv",
+                ExternalUrls: [],
+                Path: "",
+                ChannelId: null,
+                IsFolder: true,
+                Type: "CollectionFolder",
+                CollectionType: "livetv",
+                ChildCount: 0,
+                UserData: {
+                    PlaybackPositionTicks: 0,
+                    PlayCount: 0,
+                    IsFavorite: false,
+                    Played: false,
+                    Key: itemId,
+                    ItemId: itemId,
+                },
+                ImageTags: {},
+                BackdropImageTags: [],
+                ImageBlurHashes: {},
+                LocationType: "FileSystem",
+                MediaType: "Unknown",
+            });
+        }
+
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
@@ -728,7 +825,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         res.status(200).json({ message: "Terminating..." });
         console.log(`System restart initiated by ${req.user.name}`);
-        setTimeout(() => process.exit(0), 500);
+        killTelerisingProcess();
+        setTimeout(() => process.exit(1), 500);
     });
 
     app.post("/System/Shutdown", (req, res) => {
@@ -737,6 +835,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         res.status(200).json({ message: "Shutting down..." });
         console.log(`System shutdown initiated by ${req.user.name}`);
+        killTelerisingProcess();
         setTimeout(() => process.exit(0), 500);
     });
 
@@ -756,7 +855,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             SupportsLibraryMonitor: false,
             WebSocketPortNumber: 0,
             CompletedInstallations: [],
-            CanSelfRestart: true,
+            CanSelfRestart: false,
             CanLaunchWebBrowser: false,
             ProgramDataPath: "",
             ItemsByNamePath: "",
@@ -861,14 +960,17 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
     app.get("/UserViews", (req, res) => {
         if (!req.user) return res.status(401).json({ error: "Unauthorized." });
-        res.json({
-            Items: [
-                { Name: "Movies", CollectionType: "movies", Id: "movies", IsFolder: true, Type: "CollectionFolder" },
-                { Name: "Shows", CollectionType: "tvshows", Id: "shows", IsFolder: true, Type: "CollectionFolder" },
-                { Name: "Music", CollectionType: "music", Id: "music", IsFolder: true, Type: "CollectionFolder" },
-            ],
-            TotalRecordCount: 3,
-        });
+        const items = [
+            { Name: "Movies", CollectionType: "movies", Id: "movies", IsFolder: true, Type: "CollectionFolder" },
+            { Name: "Shows", CollectionType: "tvshows", Id: "shows", IsFolder: true, Type: "CollectionFolder" },
+            { Name: "Music", CollectionType: "music", Id: "music", IsFolder: true, Type: "CollectionFolder" },
+        ];
+        const db = getDb();
+        const ltConfig = (() => { try { return JSON.parse((getSystemInfo(db)?.config_json || "{}")).livetv; } catch { return null; } })();
+        if (ltConfig?.TunerHosts?.length > 0) {
+            items.push({ Name: "Live TV", CollectionType: "livetv", Id: "livetv", IsFolder: true, Type: "CollectionFolder" });
+        }
+        res.json({ Items: items, TotalRecordCount: items.length });
     });
 
     app.get("/DisplayPreferences/:id", (req, res) => {
@@ -946,12 +1048,24 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.json(result);
     });
 
-    app.get("/Items", (req, res) => {
+    app.get("/Items", async (req, res) => {
+        const parentId = req.query.parentId || req.query.ParentId;
+        if (parentId === "livetv") {
+            const db = getDb();
+            const allChannels = await getLiveTvChannels(db);
+            const limit = parseInt(req.query.Limit) || allChannels.length;
+            const start = parseInt(req.query.StartIndex) || 0;
+            return res.json({
+                Items: allChannels.slice(start, start + limit),
+                TotalRecordCount: allChannels.length,
+                StartIndex: start,
+            });
+        }
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
         const result = filteredItemsFromIndex(index, serverId, {
-            parentId: req.query.parentId || req.query.ParentId,
+            parentId,
             includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
             limit: req.query.limit || req.query.Limit,
             startIndex: req.query.startIndex || req.query.StartIndex,
@@ -959,12 +1073,24 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.json(result);
     });
 
-    app.get("/Users/:userId/Items", (req, res) => {
+    app.get("/Users/:userId/Items", async (req, res) => {
+        const parentId = req.query.parentId || req.query.ParentId;
+        if (parentId === "livetv") {
+            const db = getDb();
+            const allChannels = await getLiveTvChannels(db);
+            const limit = parseInt(req.query.Limit) || allChannels.length;
+            const start = parseInt(req.query.StartIndex) || 0;
+            return res.json({
+                Items: allChannels.slice(start, start + limit),
+                TotalRecordCount: allChannels.length,
+                StartIndex: start,
+            });
+        }
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
         const result = filteredItemsFromIndex(index, serverId, {
-            parentId: req.query.parentId || req.query.ParentId,
+            parentId,
             includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
             limit: req.query.limit || req.query.Limit,
             startIndex: req.query.startIndex || req.query.StartIndex,
@@ -997,6 +1123,42 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         if (!found) for (const m of index.music || []) {
             if (generateItemId(m.id || m.filePath) === rawId) { found = m; itemPath = m.filePath; itemType = "Audio"; break; }
+        }
+        if (!found) for (const u of index.unsorted || []) {
+            if (generateItemId(u.id || u.filePath) === rawId) { found = u; itemPath = u.filePath; itemType = "Video"; break; }
+        }
+        // check if it's a LiveTV channel
+        if (!found) {
+            const tvChannel = findLiveTvChannel(rawId);
+            if (tvChannel) {
+                return res.json({
+                    Name: tvChannel.Name,
+                    ServerId: tvChannel.ServerId,
+                    Id: tvChannel.Id,
+                    SortName: tvChannel.SortName,
+                    Number: tvChannel.Number,
+                    ChannelNumber: tvChannel.ChannelNumber,
+                    ChannelType: "TV",
+                    IsFolder: false,
+                    Type: "TvChannel",
+                    LocationType: "Remote",
+                    MediaType: "Video",
+                    DateCreated: new Date().toISOString(),
+                    CanDelete: false,
+                    CanDownload: false,
+                    ExternalUrls: [],
+                    MediaSources: tvChannel.MediaSources,
+                    ImageTags: tvChannel.ImageTags,
+                    Overview: "",
+                    ParentId: "",
+                    GenreItems: [],
+                    Genres: tvChannel.Genres,
+                    Tags: [],
+                    UserData: tvChannel.UserData,
+                    ImageBlurHashes: {},
+                    BackdropImageTags: [],
+                });
+            }
         }
         // check if it's a season folder
         if (!found && index.shows?.length > 0) {
@@ -1036,10 +1198,11 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 LocationType: "FileSystem",
             });
         }
-        const parentId = itemType === "Movie" ? generateItemId("movies") : itemType === "Episode" ? generateItemId(found.showName) : generateItemId("music");
+        const parentId = itemType === "Movie" ? generateItemId("movies") : itemType === "Episode" ? generateItemId(found.showName) : itemType === "Video" ? generateItemId("unsorted") : generateItemId("music");
         const isMovie = itemType === "Movie";
         const isEpisode = itemType === "Episode";
 
+        const isVideoItem = isMovie || isEpisode || itemType === "Video";
         const mediaSource = probe ? {
             Protocol: "File",
             Id: id,
@@ -1048,16 +1211,21 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             Container: probe.container,
             Size: probe.size,
             Name: found.title || "Unknown",
+            SortName: (found.title || "unknown").toLowerCase(),
             IsRemote: false,
             RunTimeTicks: Math.round(probe.duration * 10000000),
             SupportsTranscoding: true,
             SupportsDirectStream: true,
             SupportsDirectPlay: true,
-            VideoType: isMovie || isEpisode ? "VideoFile" : undefined,
+            DirectPlayUrl: `/Videos/${id}/stream?static=true&api_key=`,
+            DirectStreamUrl: `/Videos/${id}/stream`,
+            VideoType: isVideoItem ? "VideoFile" : undefined,
             MediaStreams: probe.streams,
             Bitrate: probe.bitrate,
-            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio"),
+            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null,
             HasSegments: false,
+            ETag: id,
+            PlaySessionId: crypto.randomUUID(),
         } : null;
 
         const poster = findPosterPath(itemPath);
@@ -1095,8 +1263,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             BackdropImageTags: [],
             ImageBlurHashes: poster ? { Primary: {} } : {},
             LocationType: "FileSystem",
-            MediaType: isMovie || isEpisode ? "Video" : "Audio",
-            VideoType: isMovie || isEpisode ? "VideoFile" : undefined,
+            MediaType: (isMovie || isEpisode || itemType === "Video") ? "Video" : "Audio",
+            VideoType: (isMovie || isEpisode || itemType === "Video") ? "VideoFile" : undefined,
             PrimaryImageAspectRatio: probe?.width && probe?.height ? probe.width / probe.height : 0,
         });
     }
@@ -1125,7 +1293,7 @@ export async function addonRoutes(app) {
     });
 }
 
-export async function jellyfinRoutes(app) {
+export async function jellyfinRoutes(app, getDb, apiVersion) {
 
     // === Artist ===
     app.get('/Artists', (req, res) => { /* GetArtists */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1142,7 +1310,7 @@ export async function jellyfinRoutes(app) {
     };
 
     function findFileByItemId(itemId) {
-        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
         const rawId = (itemId || "").replace(/-/g, "");
         for (const ep of index.shows || []) {
             if (generateItemId(ep.id || ep.filePath) === rawId) return ep.filePath;
@@ -1153,10 +1321,33 @@ export async function jellyfinRoutes(app) {
         for (const m of index.music || []) {
             if (generateItemId(m.id || m.filePath) === rawId) return m.filePath;
         }
+        for (const u of index.unsorted || []) {
+            if (generateItemId(u.id || u.filePath) === rawId) return u.filePath;
+        }
         return null;
     }
 
     function streamFile(req, res, itemId) {
+        const rawId = (itemId || "").replace(/-/g, "");
+        const tvChannel = findLiveTvChannel(rawId);
+        if (tvChannel) {
+            const streamUrl = tvChannel.MediaSources[0]?.Path;
+            if (!streamUrl) return res.status(404).json({ error: "No stream URL." });
+            const proto = streamUrl.startsWith("https") ? https : http;
+            return proto.get(streamUrl, { timeout: 15000 }, (upstream) => {
+                if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
+                    const redir = upstream.headers.location;
+                    const rp = redir.startsWith("https") ? https : http;
+                    return rp.get(redir, { timeout: 15000 }, (r2) => {
+                        res.writeHead(r2.statusCode, { "Content-Type": r2.headers["content-type"] || "application/x-mpegURL" });
+                        r2.pipe(res);
+                    }).on("error", () => res.status(502).end());
+                }
+                res.writeHead(upstream.statusCode, { "Content-Type": upstream.headers["content-type"] || "application/x-mpegURL" });
+                upstream.pipe(res);
+            }).on("error", () => res.status(502).end());
+        }
+
         const filePath = findFileByItemId(itemId);
         if (!filePath) return res.status(404).json({ error: "Item not found." });
 
@@ -1217,7 +1408,6 @@ export async function jellyfinRoutes(app) {
     app.post('/Backup/Restore', (req, res) => { /* StartRestoreBackup */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Branding ===
-    app.get('/Branding/Configuration', (req, res) => { /* GetBrandingOptions */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Branding/Css.css', (req, res) => { /* GetBrandingCss_2 */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Branding/Css', (req, res) => { /* GetBrandingCss */ res.status(200).json({ message: 'Not implemented' }); });
 
@@ -1234,11 +1424,58 @@ export async function jellyfinRoutes(app) {
     app.post('/Collections/:collectionId/Items', (req, res) => { /* AddToCollection */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Device ===
-    app.delete('/Devices', (req, res) => { /* DeleteDevice */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Devices', (req, res) => { /* GetDevices */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Devices/Info', (req, res) => { /* GetDeviceInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Devices/Options', (req, res) => { /* GetDeviceOptions */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Devices/Options', (req, res) => { /* UpdateDeviceOptions */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Devices', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const sessions = db.prepare(`
+            SELECT sessions.token, sessions.created_at, users.id as user_id, users.uuid, users.name as user_name
+            FROM sessions JOIN users ON users.id = sessions.user_id
+        `).all();
+
+        const devices = sessions.map(s => ({
+            Name: "Web Browser",
+            CustomName: null,
+            AccessToken: s.token,
+            Id: s.token,
+            LastUserName: s.user_name,
+            AppName: "HMSS",
+            AppVersion: apiVersion,
+            LastUserId: s.uuid || String(s.user_id),
+            DateLastActivity: s.created_at,
+            Capabilities: { PlayableMediaTypes: ["Audio", "Video"], SupportedCommands: [], SupportsMediaControl: true, SupportsPersistentIdentifier: false },
+            IconUrl: null,
+        }));
+
+        res.json({ Items: devices, TotalRecordCount: devices.length, StartIndex: 0 });
+    });
+
+    app.delete('/Devices', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const id = req.query.Id;
+        if (id) {
+            const db = getDb();
+            db.prepare("DELETE FROM sessions WHERE token = ?").run(id);
+        }
+        res.status(204).end();
+    });
+
+    app.get('/Devices/Info', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({
+            Name: req.headers["x-emby-devicename"] || "Web Browser",
+            Id: req.headers["x-emby-deviceid"] || "web",
+        });
+    });
+
+    app.get('/Devices/Options', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.post('/Devices/Options', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.status(204).end();
+    });
 
     // === DisplayPreference ===
     app.get('/DisplayPreferences/:displayPreferencesId', (req, res) => { /* GetDisplayPreferences */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1247,13 +1484,10 @@ export async function jellyfinRoutes(app) {
     // === Environment ===
     app.get('/Environment/DefaultDirectoryBrowser', (req, res) => { /* GetDefaultDirectoryBrowser */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Environment/DirectoryContents', (req, res) => { /* GetDirectoryContents */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Environment/Drives', (req, res) => { /* GetDrives */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Environment/ParentPath', (req, res) => { /* GetParentPath */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Environment/ValidatePath', (req, res) => { /* ValidatePath */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Filter ===
-    app.get('/Items/Filters', (req, res) => { /* GetQueryFiltersLegacy */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/Filters2', (req, res) => { /* GetQueryFilters */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Genre ===
     app.get('/Genres', (req, res) => { /* GetGenres */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1293,10 +1527,6 @@ export async function jellyfinRoutes(app) {
     app.head('/Studios/:name/Images/:imageType', (req, res) => { /* HeadStudioImage */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Studios/:name/Images/:imageType/:imageIndex', (req, res) => { /* GetStudioImageByIndex */ res.status(200).json({ message: 'Not implemented' }); });
     app.head('/Studios/:name/Images/:imageType/:imageIndex', (req, res) => { /* HeadStudioImageByIndex */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/UserImage', (req, res) => { /* DeleteUserImage */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/UserImage', (req, res) => { /* GetUserImage */ res.status(200).json({ message: 'Not implemented' }); });
-    app.head('/UserImage', (req, res) => { /* HeadUserImage */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/UserImage', (req, res) => { /* PostUserImage */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === InstantMix ===
     app.get('/Albums/:itemId/InstantMix', (req, res) => { /* GetInstantMixFromAlbum */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1326,15 +1556,12 @@ export async function jellyfinRoutes(app) {
     app.get('/Items/:itemId/MetadataEditor', (req, res) => { /* GetMetadataEditorInfo */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Library ===
-    app.get('/Albums/:itemId/Similar', (req, res) => { /* GetSimilarAlbums */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Artists/:itemId/Similar', (req, res) => { /* GetSimilarArtists */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Albums/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
+    app.get('/Artists/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.delete('/Items', (req, res) => { /* DeleteItems */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items', (req, res) => { /* GetItems */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/Counts', (req, res) => { /* GetItemCounts */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/Latest', (req, res) => { /* GetLatestMedia */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/Root', (req, res) => { /* GetRootFolder */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Items/:itemId', (req, res) => { /* DeleteItem */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/:itemId', (req, res) => { /* GetItem */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Ancestors', (req, res) => { /* GetAncestors */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Collections', (req, res) => { /* GetItemCollections */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Download', (req, res) => { /* GetDownload */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1342,7 +1569,70 @@ export async function jellyfinRoutes(app) {
     app.get('/Users/:itemId/Items/:itemId/Intros', (req, res) => { /* GetIntros */ res.status(200).json({"Items":[],"TotalRecordCount":0,"StartIndex":0}); });
     app.get('/Items/:itemId/LocalTrailers', (req, res) => { /* GetLocalTrailers */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Items/:itemId/Refresh', (req, res) => { /* RefreshItem */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/:itemId/Similar', (req, res) => { /* GetSimilarItems */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Items/:itemId/Similar', (req, res) => {
+        const sys = getSystemInfo(getDb());
+        const serverId = sys?.id || "hmss-local";
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const rawId = (req.params.itemId || "").replace(/-/g, "");
+        const limit = parseInt(req.query.limit) || 12;
+
+        let itemType = null;
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) { itemType = "Episode"; break; }
+            if (generateItemId(ep.showName) === rawId) { itemType = "Series"; break; }
+        }
+        if (!itemType) for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { itemType = "Movie"; break; }
+        }
+        if (!itemType) for (const m of index.music || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { itemType = "Audio"; break; }
+        }
+        if (!itemType) for (const u of index.unsorted || []) {
+            if (generateItemId(u.id || u.filePath) === rawId) { itemType = "Video"; break; }
+        }
+
+        const candidates = [];
+        if (itemType === "Episode" || itemType === "Series") {
+            for (const ep of index.shows || []) {
+                const id = generateItemId(ep.id || ep.filePath);
+                if (id !== rawId) candidates.push(ep);
+            }
+        } else if (itemType === "Movie") {
+            for (const m of index.movies || []) {
+                const id = generateItemId(m.id || m.filePath);
+                if (id !== rawId) candidates.push(m);
+            }
+        } else if (itemType === "Audio") {
+            for (const m of index.music || []) {
+                const id = generateItemId(m.id || m.filePath);
+                if (id !== rawId) candidates.push(m);
+            }
+        } else if (itemType === "Video") {
+            for (const u of index.unsorted || []) {
+                const id = generateItemId(u.id || u.filePath);
+                if (id !== rawId) candidates.push(u);
+            }
+        }
+
+        const shuffled = candidates.sort(() => Math.random() - 0.5).slice(0, limit);
+        const items = shuffled.map(item => {
+            const id = generateItemId(item.id || item.filePath);
+            const poster = findPosterPath(item.filePath);
+            return {
+                Name: item.title || "Unknown",
+                ServerId: serverId,
+                Id: id,
+                SortName: (item.title || "").toLowerCase(),
+                Path: item.filePath || "",
+                Type: itemType === "Audio" ? "Audio" : "Video",
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: id.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"), ItemId: id },
+                ImageTags: poster ? { Primary: poster.tag } : {},
+                BackdropImageTags: [],
+            };
+        });
+
+        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
+    });
     app.get('/Items/:itemId/SpecialFeatures', (req, res) => { /* GetSpecialFeatures */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/ThemeMedia', (req, res) => { /* GetThemeMedia */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/ThemeSongs', (req, res) => { /* GetThemeSongs */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1356,14 +1646,13 @@ export async function jellyfinRoutes(app) {
     app.post('/Library/Refresh', (req, res) => { /* RefreshLibrary */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Library/Series/Added', (req, res) => { /* PostAddedSeries */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Library/Series/Updated', (req, res) => { /* PostUpdatedSeries */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Movies/:itemId/Similar', (req, res) => { /* GetSimilarMovies */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Shows/:itemId/Similar', (req, res) => { /* GetSimilarShows */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Trailers/:itemId/Similar', (req, res) => { /* GetSimilarTrailers */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Movies/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
+    app.get('/Shows/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
+    app.get('/Trailers/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.get('/UserItems/Resume', (req, res) => { /* GetResumeItems */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === LibraryStructure ===
     app.delete('/Library/VirtualFolders', (req, res) => { /* RemoveVirtualFolder */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Library/VirtualFolders', (req, res) => { /* GetVirtualFolders */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Library/VirtualFolders', (req, res) => { /* AddVirtualFolder */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Library/VirtualFolders/LibraryOptions', (req, res) => { /* UpdateLibraryOptions */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Library/VirtualFolders/Name', (req, res) => { /* RenameVirtualFolder */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1372,49 +1661,339 @@ export async function jellyfinRoutes(app) {
     app.post('/Library/VirtualFolders/Paths/Update', (req, res) => { /* UpdateMediaPath */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === LiveTv ===
-    app.get('/LiveTv/ChannelMappingOptions', (req, res) => { /* GetChannelMappingOptions */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/ChannelMappings', (req, res) => { /* SetChannelMapping */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Channels', (req, res) => { /* GetLiveTvChannels */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Channels/:channelId', (req, res) => { /* GetChannel */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/GuideInfo', (req, res) => { /* GetGuideInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Info', (req, res) => { /* GetLiveTvInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/LiveTv/ListingProviders', (req, res) => { /* DeleteListingProvider */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/ListingProviders', (req, res) => { /* AddListingProvider */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/ListingProviders/Default', (req, res) => { /* GetDefaultListingProvider */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/ListingProviders/Lineups', (req, res) => { /* GetLineups */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/ListingProviders/SchedulesDirect/Countries', (req, res) => { /* GetSchedulesDirectCountries */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/LiveRecordings/:recordingId/stream', (req, res) => { /* GetLiveRecordingFile */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/LiveStreamFiles/:streamId/stream.:container', (req, res) => { /* GetLiveStreamFile */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Programs', (req, res) => { /* GetLiveTvPrograms */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/Programs', (req, res) => { /* GetPrograms */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Programs/Recommended', (req, res) => { /* GetRecommendedPrograms */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Programs/:programId', (req, res) => { /* GetProgram */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Recordings', (req, res) => { /* GetRecordings */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Recordings/Folders', (req, res) => { /* GetRecordingFolders */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/LiveTv/Recordings/:recordingId', (req, res) => { /* DeleteRecording */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Recordings/:recordingId', (req, res) => { /* GetRecording */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/SeriesTimers', (req, res) => { /* GetSeriesTimers */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/SeriesTimers', (req, res) => { /* CreateSeriesTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/LiveTv/SeriesTimers/:timerId', (req, res) => { /* CancelSeriesTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/SeriesTimers/:timerId', (req, res) => { /* GetSeriesTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/SeriesTimers/:timerId', (req, res) => { /* UpdateSeriesTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Timers', (req, res) => { /* GetTimers */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/Timers', (req, res) => { /* CreateTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Timers/Defaults', (req, res) => { /* GetDefaultTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/LiveTv/Timers/:timerId', (req, res) => { /* CancelTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Timers/:timerId', (req, res) => { /* GetTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/Timers/:timerId', (req, res) => { /* UpdateTimer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/LiveTv/TunerHosts', (req, res) => { /* DeleteTunerHost */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/TunerHosts', (req, res) => { /* AddTunerHost */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/TunerHosts/Types', (req, res) => { /* GetTunerHostTypes */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Tuners/Discover', (req, res) => { /* DiscoverTuners */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/LiveTv/Tuners/Discvover', (req, res) => { /* DiscvoverTuners */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/LiveTv/Tuners/:tunerId/Reset', (req, res) => { /* ResetTuner */ res.status(200).json({ message: 'Not implemented' }); });
+    function getLiveTvConfig(db) {
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        return stored.livetv || {
+            EnableRecordingSubfolders: false,
+            EnableOriginalAudioWithEncodedRecordings: false,
+            TunerHosts: [],
+            ListingProviders: [],
+            PrePaddingSeconds: 0,
+            PostPaddingSeconds: 0,
+            MediaLocationsCreated: [],
+            RecordingPostProcessorArguments: "",
+            SaveRecordingNFO: true,
+            SaveRecordingImages: true,
+        };
+    }
+
+    function setLiveTvConfig(db, config) {
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        stored.livetv = config;
+        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
+    }
+
+    // --- LiveTV channel cache ---
+    async function getLiveTvChannels(db) {
+        if (Date.now() - _liveTvCache.ts < 30000 && _liveTvCache.channels.length > 0) return _liveTvCache.channels;
+        const config = getLiveTvConfig(db);
+        if (!config.TunerHosts || config.TunerHosts.length === 0) { _liveTvCache = { channels: [], ts: Date.now() }; return []; }
+        const serverId = getSystemInfo(db)?.id || "hmss-local";
+        const all = [];
+        for (const host of config.TunerHosts) {
+            if (!host.Url) continue;
+            try {
+                const m3u = await fetchM3U(host.Url);
+                const parsed = parseM3U(m3u);
+                for (const ch of parsed) {
+                    all.push({
+                        Name: ch.name,
+                        ServerId: serverId,
+                        Id: ch.id,
+                        SortName: ch.name.toLowerCase(),
+                        Number: String(ch.chno || 0),
+                        ChannelNumber: String(ch.chno || 0),
+                        ChannelType: "TV",
+                        IsFolder: false,
+                        Type: "TvChannel",
+                        LocationType: "Remote",
+                        MediaType: "Video",
+                        MediaSources: [{
+                            Protocol: "Stream",
+                            Id: ch.id,
+                            Name: ch.name,
+                            Path: ch.url,
+                            Type: "Default",
+                            Container: "hls",
+                            IsRemote: true,
+                            SupportsDirectPlay: true,
+                            SupportsDirectStream: true,
+                            SupportsTranscoding: false,
+                        }],
+                        ImageTags: ch.logo ? { Primary: ch.id } : {},
+                        LogoUrl: ch.logo || "",
+                        Overview: "",
+                        ParentId: "",
+                        GenreItems: [],
+                        Genres: [ch.group],
+                        Tags: [],
+                        UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false },
+                    });
+                }
+            } catch {}
+        }
+        _liveTvCache = { channels: all, ts: Date.now() };
+        return all;
+    }
+
+    function fetchM3U(url) {
+        return new Promise((resolve, reject) => {
+            http.get(url, { timeout: 10000 }, (res) => {
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    return fetchM3U(res.headers.location).then(resolve, reject);
+                }
+                let body = "";
+                res.on("data", (c) => body += c);
+                res.on("end", () => resolve(body));
+            }).on("error", reject);
+        });
+    }
+
+    function parseM3U(content) {
+        const lines = content.split("\n").map(l => l.trim()).filter(Boolean);
+        const channels = [];
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].startsWith("#EXTINF:")) {
+                const inf = lines[i];
+                const url = lines[i + 1];
+                if (!url || url.startsWith("#")) continue;
+
+                const nameMatch = inf.match(/,\s*(.+)$/);
+                const name = nameMatch ? nameMatch[1].trim() : "Unknown";
+                const logoMatch = inf.match(/tvg-logo="([^"]+)"/);
+                const logo = logoMatch ? logoMatch[1] : "";
+                const groupMatch = inf.match(/group-title="([^"]+)"/);
+                const group = groupMatch ? groupMatch[1] : "General";
+                const idMatch = inf.match(/tvg-id="([^"]+)"/);
+                const tvgId = idMatch ? idMatch[1] : "";
+                const chnoMatch = inf.match(/tvg-chno="([^"]+)"/);
+                const chno = chnoMatch ? parseInt(chnoMatch[1]) : 0;
+
+                const id = generateItemId(name + url);
+                channels.push({ id, name, logo, group, tvgId, chno, url });
+            }
+        }
+        return channels;
+    }
+
+    app.get('/LiveTv/Info', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const hasTuners = config.TunerHosts && config.TunerHosts.length > 0;
+        res.json({
+            Status: hasTuners ? "Available" : "Unavailable",
+            Tuners: [],
+        });
+    });
+
+    app.get('/LiveTv/Channels', async (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const allChannels = await getLiveTvChannels(db);
+        const limit = parseInt(req.query.Limit) || 100;
+        const start = parseInt(req.query.StartIndex) || 0;
+        res.json({
+            Items: allChannels.slice(start, start + limit),
+            TotalRecordCount: allChannels.length,
+            StartIndex: start,
+        });
+    });
+
+    app.get('/LiveTv/Channels/:channelId', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.status(404).json({ error: "Channel not found." });
+    });
+
+    app.get('/LiveTv/GuideInfo', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const now = new Date();
+        const end = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+        res.json({
+            StartDate: now.toISOString(),
+            EndDate: end.toISOString(),
+        });
+    });
+
+    app.get('/LiveTv/ChannelMappingOptions', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ MappingOptions: [], Mappings: [], ProviderName: "" });
+    });
+
+    app.post('/LiveTv/ChannelMappings', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ StatusCode: 200 });
+    });
+
+    app.get('/LiveTv/ListingProviders/Default', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Type: "Disabled" });
+    });
+
+    app.get('/LiveTv/ListingProviders/Lineups', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json([]);
+    });
+
+    app.get('/LiveTv/ListingProviders/SchedulesDirect/Countries', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json([]);
+    });
+
+    app.post('/LiveTv/ListingProviders', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ StatusCode: 200 });
+    });
+
+    app.delete('/LiveTv/ListingProviders', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ StatusCode: 200 });
+    });
+
+    app.post('/LiveTv/TunerHosts', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const body = req.body || {};
+
+        if (!body.Type || !body.Url) {
+            return res.status(400).json({ error: "Type and Url required." });
+        }
+
+        const host = {
+            Type: body.Type,
+            Url: body.Url,
+            FriendlyName: body.FriendlyName || "",
+            DeviceId: body.DeviceId || "",
+            ImportFavoritesOnly: body.ImportFavoritesOnly ?? false,
+            AllowHWTranscoding: body.AllowHWTranscoding ?? false,
+            AllowFmp4TranscodingContainer: body.AllowFmp4TranscodingContainer ?? true,
+            AllowStreamSharing: body.AllowStreamSharing ?? false,
+            FallbackMaxStreamingBitrate: body.FallbackMaxStreamingBitrate ?? 30000000,
+            EnableStreamLooping: body.EnableStreamLooping ?? false,
+            TunerCount: body.TunerCount ?? 0,
+            IgnoreDts: body.IgnoreDts ?? true,
+            ReadAtNativeFramerate: body.ReadAtNativeFramerate ?? true,
+            Id: body.Id || generateItemId(body.Url + Date.now()),
+        };
+
+        const existingIdx = config.TunerHosts.findIndex(h => h.Id === host.Id);
+        if (existingIdx >= 0) {
+            config.TunerHosts[existingIdx] = host;
+        } else {
+            config.TunerHosts.push(host);
+        }
+
+        setLiveTvConfig(db, config);
+        res.json(host);
+    });
+
+    app.delete('/LiveTv/TunerHosts', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const id = req.query.Id || req.body?.Id;
+
+        if (!id) return res.status(400).json({ error: "Id required." });
+
+        config.TunerHosts = config.TunerHosts.filter(h => h.Id !== id);
+        setLiveTvConfig(db, config);
+        res.json({ StatusCode: 200 });
+    });
+
+    app.get('/LiveTv/TunerHosts/Types', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json([
+            { Name: "HD Homerun", Id: "hdhomerun" },
+            { Name: "M3U Tuner", Id: "m3u" },
+        ]);
+    });
+
+    app.get('/LiveTv/Tuners/Discover', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json([]);
+    });
+
+    app.get('/LiveTv/Tuners/Discvover', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json([]);
+    });
+
+    app.get('/LiveTv/Programs', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.post('/LiveTv/Programs', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.get('/LiveTv/Programs/Recommended', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.get('/LiveTv/Programs/:programId', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.status(404).json({ error: "Program not found." });
+    });
+
+    app.get('/LiveTv/Recordings', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.get('/LiveTv/Recordings/Folders', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json([]);
+    });
+
+    app.get('/LiveTv/SeriesTimers', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.post('/LiveTv/SeriesTimers', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ StatusCode: 200 });
+    });
+
+    app.get('/LiveTv/Timers', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.post('/LiveTv/Timers', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ StatusCode: 200 });
+    });
+
+    app.get('/LiveTv/Timers/Defaults', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({});
+    });
+
+    app.get('/LiveTv/LiveRecordings/:recordingId/stream', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.status(404).end();
+    });
+
+    app.get('/LiveTv/LiveStreamFiles/:streamId/stream.:container', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.status(404).end();
+    });
+
+    app.post('/LiveTv/Tuners/:tunerId/Reset', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        res.json({ StatusCode: 200 });
+    });
 
     // === Localization ===
-    app.get('/Localization/Countries', (req, res) => { /* GetCountries */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Localization/Cultures', (req, res) => { /* GetCultures */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Localization/Options', (req, res) => { /* GetLocalizationOptions */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Localization/ParentalRatings', (req, res) => { /* GetParentalRatings */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Lyric ===
@@ -1427,7 +2006,7 @@ export async function jellyfinRoutes(app) {
 
     // === MediaInfo ===
     async function findItemForPlayback(req) {
-        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
         const rawId = (req.params.itemId || "").replace(/-/g, "");
         let found = null, itemPath = null, itemType = null;
         for (const ep of index.shows || []) {
@@ -1440,10 +2019,25 @@ export async function jellyfinRoutes(app) {
         if (!found) for (const m of index.music || []) {
             if (generateItemId(m.id || m.filePath) === rawId) { found = m; itemPath = m.filePath; itemType = "Audio"; break; }
         }
+        if (!found) for (const u of index.unsorted || []) {
+            if (generateItemId(u.id || u.filePath) === rawId) { found = u; itemPath = u.filePath; itemType = "Video"; break; }
+        }
         if (!found && index.shows?.length > 0) {
             for (const ep of index.shows) {
                 const seasonId = generateItemId(`${ep.showName}-s${ep.season}`);
                 if (seasonId === rawId) { found = ep; itemType = "Season"; break; }
+            }
+        }
+        if (!found) {
+            const tvChannel = findLiveTvChannel(rawId);
+            if (tvChannel) {
+                return {
+                    found: { title: tvChannel.Name, id: tvChannel.Id },
+                    itemPath: null,
+                    itemType: "TvChannel",
+                    probe: null,
+                    tvChannel,
+                };
             }
         }
         if (!found) return null;
@@ -1457,7 +2051,7 @@ export async function jellyfinRoutes(app) {
 
     function buildMediaSource(found, itemPath, id, probe, itemType) {
         if (!probe) return null;
-        const isVideo = itemType === "Episode" || itemType === "Movie";
+        const isVideo = itemType === "Episode" || itemType === "Movie" || itemType === "Video";
         return {
             Protocol: "File",
             Id: id,
@@ -1466,15 +2060,121 @@ export async function jellyfinRoutes(app) {
             Container: probe.container,
             Size: probe.size,
             Name: found.title || "Unknown",
+            SortName: (found.title || "unknown").toLowerCase(),
             IsRemote: false,
             RunTimeTicks: Math.round(probe.duration * 10000000),
             SupportsTranscoding: true,
             SupportsDirectStream: true,
             SupportsDirectPlay: true,
+            DirectPlayUrl: `/Videos/${id}/stream?static=true&api_key=`,
+            DirectStreamUrl: `/Videos/${id}/stream`,
             VideoType: isVideo ? "VideoFile" : undefined,
             MediaStreams: probe.streams,
             Bitrate: probe.bitrate,
-            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio"),
+            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null,
+            HasSegments: false,
+            ETag: id,
+            PlaySessionId: crypto.randomUUID(),
+        };
+    }
+
+    function buildLiveTvMediaSource(tvChannel) {
+        const ch = tvChannel.MediaSources[0];
+        const liveStreamId = crypto.createHash("md5").update(ch.Id + Date.now()).digest("hex");
+        return {
+            Protocol: "Http",
+            Id: ch.Id,
+            Path: ch.Path,
+            Type: "Default",
+            Container: "hls",
+            Size: 0,
+            IsRemote: false,
+            ReadAtNativeFramerate: true,
+            IgnoreDts: true,
+            IgnoreIndex: false,
+            GenPtsInput: false,
+            SupportsTranscoding: true,
+            SupportsDirectStream: true,
+            SupportsDirectPlay: true,
+            IsInfiniteStream: true,
+            UseMostCompatibleTranscodingProfile: false,
+            RequiresOpening: true,
+            RequiresClosing: true,
+            LiveStreamId: liveStreamId,
+            RequiresLooping: false,
+            SupportsProbing: true,
+            MediaStreams: [
+                {
+                    Codec: "h264",
+                    CodecTag: "avc1",
+                    TimeBase: "1/1000",
+                    VideoRange: "SDR",
+                    VideoRangeType: "SDR",
+                    AudioSpatialFormat: "None",
+                    DisplayTitle: "H264 SDR",
+                    NalLengthSize: "4",
+                    IsInterlaced: false,
+                    BitRate: 0,
+                    BitDepth: 8,
+                    RefFrames: 1,
+                    IsDefault: true,
+                    IsForced: false,
+                    IsHearingImpaired: false,
+                    Height: 0,
+                    Width: 0,
+                    AverageFrameRate: 0,
+                    RealFrameRate: 0,
+                    ReferenceFrameRate: 0,
+                    Profile: "Main",
+                    Type: "Video",
+                    AspectRatio: "16:9",
+                    Index: -1,
+                    IsExternal: false,
+                    IsTextSubtitleStream: false,
+                    SupportsExternalStream: false,
+                    PixelFormat: "yuv420p",
+                    Level: 32,
+                    IsAnamorphic: false,
+                },
+                {
+                    Codec: "aac",
+                    CodecTag: "mp4a",
+                    Comment: "default",
+                    TimeBase: "1/48000",
+                    VideoRange: "Unknown",
+                    VideoRangeType: "Unknown",
+                    AudioSpatialFormat: "None",
+                    LocalizedDefault: "Default",
+                    LocalizedExternal: "External",
+                    DisplayTitle: "AAC - Stereo - Default",
+                    IsInterlaced: false,
+                    IsAVC: false,
+                    ChannelLayout: "stereo",
+                    BitRate: 128000,
+                    Channels: 2,
+                    SampleRate: 48000,
+                    IsDefault: true,
+                    IsForced: false,
+                    IsHearingImpaired: false,
+                    Profile: "LC",
+                    Type: "Audio",
+                    Index: -1,
+                    IsExternal: false,
+                    IsTextSubtitleStream: false,
+                    SupportsExternalStream: false,
+                    Level: 0,
+                },
+            ],
+            MediaAttachments: [],
+            Formats: [],
+            Bitrate: 0,
+            FallbackMaxStreamingBitrate: 30000000,
+            RequiredHttpHeaders: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            },
+            TranscodingSubProtocol: "http",
+            AnalyzeDurationMs: 3000,
+            DefaultAudioStreamIndex: 1,
             HasSegments: false,
         };
     }
@@ -1490,6 +2190,9 @@ export async function jellyfinRoutes(app) {
     app.get('/Items/:itemId/PlaybackInfo', async (req, res) => {
         const item = await findItemForPlayback(req);
         if (!item) return res.status(404).json({ error: "Item not found." });
+        if (item.tvChannel) {
+            return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel)));
+        }
         const id = generateItemId(item.found.id || item.found.filePath);
         const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType);
         res.json(buildPlaybackInfoResponse(mediaSource));
@@ -1498,6 +2201,9 @@ export async function jellyfinRoutes(app) {
     app.post('/Items/:itemId/PlaybackInfo', async (req, res) => {
         const item = await findItemForPlayback(req);
         if (!item) return res.status(404).json({ error: "Item not found." });
+        if (item.tvChannel) {
+            return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel)));
+        }
         const id = generateItemId(item.found.id || item.found.filePath);
         const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType);
         res.json(buildPlaybackInfoResponse(mediaSource));
@@ -1539,11 +2245,9 @@ export async function jellyfinRoutes(app) {
     app.post('/Playlists/:playlistId/Users/:userId', (req, res) => { /* UpdatePlaylistUser */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Plugin ===
-    app.get('/Packages', (req, res) => { /* GetPackages */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Packages/Installed/:name', (req, res) => { /* InstallPackage */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Packages/Installing/:packageId', (req, res) => { /* CancelPackageInstallation */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Packages/:name', (req, res) => { /* GetPackageInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Plugins', (req, res) => { /* GetPlugins */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Plugins/:pluginId', (req, res) => { /* UninstallPlugin */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Plugins/:pluginId/Manifest', (req, res) => { /* GetPluginManifest */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Plugins/:pluginId/:version', (req, res) => { /* UninstallPluginByVersion */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1554,9 +2258,7 @@ export async function jellyfinRoutes(app) {
     app.post('/Repositories', (req, res) => { /* SetRepositories */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === RemoteImage ===
-    app.get('/Items/:itemId/RemoteImages', (req, res) => { /* GetRemoteImages */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Items/:itemId/RemoteImages/Download', (req, res) => { /* DownloadRemoteImage */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/:itemId/RemoteImages/Providers', (req, res) => { /* GetRemoteImageProviders */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === ScheduledTask ===
     app.get('/ScheduledTasks', (req, res) => {
@@ -1596,13 +2298,7 @@ export async function jellyfinRoutes(app) {
     app.get('/Shows/:seriesId/Seasons', (req, res) => { /* GetSeasons */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Startup ===
-    app.post('/Startup/Complete', (req, res) => { /* CompleteWizard */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Startup/Configuration', (req, res) => { /* GetStartupConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Startup/Configuration', (req, res) => { /* UpdateInitialConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Startup/FirstUser', (req, res) => { /* GetFirstUser_2 */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Startup/RemoteAccess', (req, res) => { /* SetRemoteAccess */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Startup/User', (req, res) => { /* GetFirstUser */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Startup/User', (req, res) => { /* UpdateStartupUser */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Studio ===
     app.get('/Studios', (req, res) => { /* GetStudios */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1621,7 +2317,6 @@ export async function jellyfinRoutes(app) {
     app.get('/Videos/:routeItemId/:routeMediaSourceId/Subtitles/:routeIndex/:routeStartPositionTicks/Stream.:routeFormat', (req, res) => { /* GetSubtitleWithTicks */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Suggestion ===
-    app.get('/Items/Suggestions', (req, res) => { /* GetSuggestions */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === SyncPlay ===
     app.post('/SyncPlay/Buffering', (req, res) => { /* SyncPlayBuffering */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1650,17 +2345,41 @@ export async function jellyfinRoutes(app) {
     // === System ===
     app.post('/ClientLog/Document', (req, res) => { /* LogFile */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/GetUtcTime', (req, res) => { /* GetUtcTime */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/ActivityLog/Entries', (req, res) => { /* GetLogEntries */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Configuration', (req, res) => { /* GetConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/System/Configuration', (req, res) => { /* UpdateConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/System/Configuration/Branding', (req, res) => { /* UpdateBrandingConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/System/Configuration/MetadataOptions/Default', (req, res) => { /* GetDefaultMetadataOptions */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Configuration/:key', (req, res) => { /* GetNamedConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/System/Configuration/:key', (req, res) => { /* UpdateNamedConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Endpoint', (req, res) => { /* GetEndpointInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Info/Storage', (req, res) => { /* GetSystemStorage */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Logs', (req, res) => { /* GetServerLogs */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Logs/Log', (req, res) => { /* GetLogFile */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/System/Configuration/:key', (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const db = getDb();
+        const key = req.params.key;
+
+        if (key === "livetv") {
+            return res.json(getLiveTvConfig(db));
+        }
+
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        if (stored[key] !== undefined) return res.json(stored[key]);
+        res.json({});
+    });
+    app.post('/System/Configuration/:key', (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const db = getDb();
+        const key = req.params.key;
+        const body = req.body || {};
+
+        if (key === "livetv") {
+            setLiveTvConfig(db, body);
+            return res.json({ StatusCode: 200 });
+        }
+
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        stored[key] = body;
+        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
+        res.json({ StatusCode: 200 });
+    });
     app.get('/System/Ping', (req, res) => { res.status(200).end(); });
     app.post('/System/Ping', (req, res) => { res.status(200).end(); });
 
@@ -1674,12 +2393,9 @@ export async function jellyfinRoutes(app) {
     // === User ===
     app.post('/Users', (req, res) => { /* UpdateUser */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Users/Configuration', (req, res) => { /* UpdateUserConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Users/Me', (req, res) => { /* GetCurrentUser */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Users/New', (req, res) => { /* CreateUserByName */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Users/Password', (req, res) => { /* UpdateUserPassword */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Users/Public', (req, res) => { /* GetPublicUsers */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Users/:userId', (req, res) => { /* DeleteUser */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Users/:userId', (req, res) => { /* GetUserById */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Users/:userId/Policy', (req, res) => { /* UpdateUserPolicy */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === UserData ===
@@ -1693,7 +2409,6 @@ export async function jellyfinRoutes(app) {
     app.post('/UserPlayedItems/:itemId', (req, res) => { /* MarkPlayedItem */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === UserView ===
-    app.get('/UserViews', (req, res) => { /* GetUserViews */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/UserViews/GroupingOptions', (req, res) => { /* GetGroupingOptions */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Video ===

@@ -5,6 +5,7 @@ import figlet from "figlet"
 import express from "express"
 import { expectFailure } from "node:test"
 import { fileTypeFromFile } from "file-type"
+import crypto from "node:crypto";
 
 import { enableConsoleFileLogger } from "./src/backend/logger.js"
 import * as sql from "./src/backend/sql.js"
@@ -17,6 +18,7 @@ import { buildIndex } from "./src/backend/media_indexer.js"
 import { organizeShows, organizeMovies, organizeMusic } from "./src/backend/media_organizer.js"
 import { startDiscovery } from "./src/backend/discovery.js"
 import { spamProtection } from "./src/backend/spam_protection.js"
+import { telerisingRoutes, startTelerisingIfAutostart } from "./src/backend/telerising.js"
 
 enableConsoleFileLogger("./logs/server.log")
 console.log("=".repeat(50))
@@ -125,8 +127,9 @@ await webserver.hmssRoutes(app, getDb, JPI_Version, port, mediaDirs)
 // Host jellyfin-web for Jellyfin Mobile
 app.use("/web", express.static("web"));
 
-await webserver.jellyfinRoutes(app)
+await webserver.jellyfinRoutes(app, getDb, JPI_Version)
 await webserver.addonRoutes(app)
+telerisingRoutes(app, getDb, port)
 
 import { WebSocketServer } from "ws";
 
@@ -139,6 +142,8 @@ const server = app.listen(port, "0.0.0.0", async () => {
     } catch (err) {
         console.error("Media-Index could not been created:", err);
     }
+
+    startTelerisingIfAutostart(db);
 });
 
 const wss = new WebSocketServer({ server, path: "/socket" });
@@ -240,7 +245,5 @@ function parsePeriodic(msg, callback) {
         callback(Math.min(msg.Data, 60000));
     }
 }
-
-import crypto from "node:crypto";
 
 startDiscovery(7359, port);

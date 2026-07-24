@@ -47,24 +47,29 @@
     </div>
     <div class="center">
         <h1>Welcome to HMSS</h1>
-        <strong id="InformTextWhichDesign">HMSS offers the option to use the Jellyfin design or the HMSS design. Which one
+        <strong id="InformTextWhichDesign">HMSS offers the option to use the Jellyfin design or the HMSS design. Which
+            one
             would you like to use?</strong><br>
         <button id="useJDesign" class="JButton">Jellyfin´s Design</button><button id="useHMSSDesign"
             class="HButton">HMSS Design</button>
+        <label for="remember">Remember decision?</label>
+        <input type="checkbox" id="remember">
     </div>
     <script>
         var currDesign = localStorage.getItem("HMSSDesign")
+        const remember = document.getElementById("remember")
         if (currDesign == "J") {
             window.location.replace("/web/index.html");
         } else if (currDesign == "H") {
             // HMSS frontend — coming soon
         } else {
             document.getElementById("useJDesign").addEventListener("click", () => {
-                localStorage.setItem("HMSSDesign", "J");
+                if (remember.checked) localStorage.setItem("HMSSDesign", "J");
                 window.location.replace("/web/index.html");
             });
             document.getElementById("useHMSSDesign").addEventListener("click", () => {
-                localStorage.setItem("HMSSDesign", "H");
+                alert("Not Implemented yet");
+		//if (remember.checked) localStorage.setItem("HMSSDesign", "H");
                 // HMSS frontend — coming soon
             });
         }

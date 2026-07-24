@@ -32,7 +32,8 @@ export async function init(rootPsw, db, argon2) {
             "id" TEXT PRIMARY KEY,
             "server_name" TEXT not null,
             "product_name" TEXT not null,
-            "startup_wizard_completed" BOOLEAN not null default false
+            "startup_wizard_completed" BOOLEAN not null default false,
+            "config_json" TEXT default '{}'
         );
     `); // PERMS: 0 - 3; where 3 is root and 2 admin. 1 manager and 0 visitor
 
@@ -44,6 +45,8 @@ export async function init(rootPsw, db, argon2) {
     for (const row of missingUuid) {
         db.prepare("UPDATE users SET uuid = ? WHERE id = ?").run(randomUUID(), row.id);
     }
+
+    try { db.exec("ALTER TABLE system ADD COLUMN telerising_autostart BOOLEAN default false"); } catch {}
 
     // clear stale sessions on restart
     db.exec("DELETE FROM sessions");

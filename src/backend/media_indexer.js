@@ -15,7 +15,7 @@ export async function buildIndex(mediaDirs) {
         const parsed = parseFilename(filePath);
 
         if (!parsed.type || parsed.type === "unsorted") {
-            unsorted.push({ filePath, parsed });
+            unsorted.push({ id: sanitizeId(filePath), title: parsed.title || "Unknown", filePath, parsed });
             continue;
         }
 

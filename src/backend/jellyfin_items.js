@@ -23,6 +23,7 @@ export function mapToJellyfinItem(item, type, serverId) {
     const isEpisode = item.season && item.episode;
     const isMovie = type === "movie";
     const isShow = type === "show";
+    const isUnsorted = type === "unsorted";
     const isFolder = isShow && !item.season;
     const itemId = generateItemId(item.id || item.filePath);
     const showId = item.showName ? generateItemId(item.showName) : null;
@@ -37,7 +38,7 @@ export function mapToJellyfinItem(item, type, serverId) {
         Path: item.filePath || "",
         ChannelId: null,
         IsFolder: isFolder || false,
-        Type: isEpisode ? "Episode" : isMovie ? "Movie" : isShow ? "Series" : "Audio",
+        Type: isEpisode ? "Episode" : isMovie ? "Movie" : isShow ? "Series" : isUnsorted ? "Video" : "Audio",
         Genres: meta?.genres || [],
         ProductionYear: meta?.year || item.year || undefined,
         UserData: {
@@ -110,6 +111,24 @@ export function suggestionsFromIndex(index, userId, serverId, limit = 6) {
             album: m.album,
             filePath: m.filePath,
         }, "music", serverId));
+    }
+
+    for (const u of index.unsorted?.slice(0, limit) || []) {
+        items.push({
+            Name: u.title || "Unknown",
+            ServerId: serverId || "hmss-local",
+            Id: generateItemId(u.id || u.filePath),
+            SortName: (u.title || "unknown").toLowerCase(),
+            Path: u.filePath || "",
+            ChannelId: null,
+            IsFolder: false,
+            Type: "Video",
+            MediaType: "Video",
+            UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(generateItemId(u.id || u.filePath)), ItemId: generateItemId(u.id || u.filePath) },
+            LocationType: "FileSystem",
+            ImageTags: {},
+            BackdropImageTags: [],
+        });
     }
 
     return { Items: items.slice(0, limit), TotalRecordCount: items.length, StartIndex: 0 };
@@ -201,6 +220,27 @@ export function filteredItemsFromIndex(index, serverId, { parentId, includeItemT
         }
     }
 
+    // unsorted
+    if (parentId === "unsorted") {
+        for (const u of index.unsorted || []) {
+            items.push({
+                Name: u.title || "Unknown",
+                ServerId: serverId,
+                Id: generateItemId(u.id || u.filePath),
+                SortName: (u.title || "unknown").toLowerCase(),
+                Path: u.filePath || "",
+                ChannelId: null,
+                IsFolder: false,
+                Type: "Video",
+                MediaType: "Video",
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(generateItemId(u.id || u.filePath)), ItemId: generateItemId(u.id || u.filePath) },
+                LocationType: "FileSystem",
+                ImageTags: {},
+                BackdropImageTags: [],
+            });
+        }
+    }
+
     // no parentId — return all
     if (!parentId) {
         for (const ep of index.shows || []) {
@@ -211,6 +251,23 @@ export function filteredItemsFromIndex(index, serverId, { parentId, includeItemT
         }
         for (const m of index.music || []) {
             addIf({ id: m.id, title: m.title, artist: m.artist, album: m.album, filePath: m.filePath }, "music", "Audio");
+        }
+        for (const u of index.unsorted || []) {
+            items.push({
+                Name: u.title || "Unknown",
+                ServerId: serverId,
+                Id: generateItemId(u.id || u.filePath),
+                SortName: (u.title || "unknown").toLowerCase(),
+                Path: u.filePath || "",
+                ChannelId: null,
+                IsFolder: false,
+                Type: "Video",
+                MediaType: "Video",
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(generateItemId(u.id || u.filePath)), ItemId: generateItemId(u.id || u.filePath) },
+                LocationType: "FileSystem",
+                ImageTags: {},
+                BackdropImageTags: [],
+            });
         }
     }
 

@@ -54,11 +54,27 @@ export function probeMedia(filePath) {
             const videoStream = streams.find(s => s.Type === "Video");
             const audioStream = streams.find(s => s.Type === "Audio");
 
+            const ext = path.extname(filePath).replace(".", "").toLowerCase();
+            let container = data.format?.format_name?.split(",")[0] || "mp4";
+            if (ext === "mp4" || ext === "m4v") container = "mp4";
+            else if (ext === "mkv") container = "mkv";
+            else if (ext === "ts") container = "ts";
+            else if (ext === "avi") container = "avi";
+            else if (ext === "mov") container = "mov";
+            else if (ext === "flv") container = "flv";
+            else if (ext === "webm") container = "webm";
+            else if (ext === "wmv") container = "wmv";
+            else if (ext === "mp3") container = "mp3";
+            else if (ext === "flac") container = "flac";
+            else if (ext === "ogg") container = "ogg";
+            else if (ext === "wav") container = "wav";
+            else if (ext === "m4a") container = "m4a";
+
             resolve({
                 streams,
                 videoStream,
                 audioStream,
-                container: data.format?.format_name?.split(",")[0] || "mp4",
+                container,
                 size: parseInt(data.format?.size) || 0,
                 duration: parseFloat(data.format?.duration) || 0,
                 bitrate: parseInt(data.format?.bit_rate) || 0,
