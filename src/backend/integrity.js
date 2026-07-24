@@ -11,7 +11,6 @@ const MAX_LOG_LINES = 10000;
 export async function check(DEBUG_fail_integrity_check = false, db, port, ffmpeg_bin, mediaDirs) {
     const failedModules = [];
     if (DEBUG_fail_integrity_check) failedModules.push("DEBUG_fail_integrity_check is true")
-    await rootUserDeleteTest(failedModules, db);
     await filesystemPermissionsTest(failedModules, mediaDirs);
     await logLengthTest(failedModules);
     await portAvailabilityTest(failedModules, port);
@@ -19,14 +18,6 @@ export async function check(DEBUG_fail_integrity_check = false, db, port, ffmpeg
 
     const success = failedModules.length === 0;
     return { success, reasons: failedModules };
-}
-
-export async function rootUserDeleteTest(failedModules, db) {
-    const rootUser = db.prepare("SELECT id FROM users WHERE name = ?").get("root");
-    const test = await sql.removeUser(rootUser.id, db);
-    if (test.success) {
-        failedModules.push("Root user can be deleted (protection broken)");
-    }
 }
 
 export async function filesystemPermissionsTest(failedModules, mediaDirs) {

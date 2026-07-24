@@ -5,3 +5,4 @@
 /media/*
 *override.json
 !override.json.example
+/src/backend/profilepictures/*

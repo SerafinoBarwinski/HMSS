@@ -29,7 +29,7 @@ var mediaDirs = {
     movie: ["./media/movie"],
     music: ["./media/music"],
     shows: ["./media/shows"],
-    usort: ["./media/unsorted"],
+    unsorted: ["./media/unsorted"],
 }
 var ffmpeg_bin = "/bin/ffmpeg"
 var JPI_Version = "10.11.11" //Jellyfin API Version
@@ -61,7 +61,7 @@ console.log(figlet.textSync("HMSS", {
     verticalLayout: "default",
     width: 80,
     whitespaceBreak: true,
-  }));
+}));
 
 async function StartMediaIndex() {
     console.log("The indexer has started. This may take a while...")
@@ -106,13 +106,15 @@ app.use((req, res, next) => {
 if (DEBUG_LOG_EVERY_REQUEST) {
     app.use((req, res, next) => {
         const start = Date.now();
-        res.on("finish", () => {
-            console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - start}ms)`);
-            if (req.originalUrl === "/" || req.originalUrl === "/web/index.html") {
-                console.log("  User-Agent:", req.headers["user-agent"]?.substring(0, 80));
-                console.log("  Accept:", req.headers["accept"]?.substring(0, 80));
-            }
-        });
+        if (!req.originalUrl.includes("/web")) {
+            res.on("finish", () => {
+                console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - start}ms)`);
+                if (req.originalUrl === "/" || req.originalUrl === "/web/index.html") {
+                    console.log("  User-Agent:", req.headers["user-agent"]?.substring(0, 80));
+                    console.log("  Accept:", req.headers["accept"]?.substring(0, 80));
+                }
+            });
+        }
         next();
     });
 }
@@ -120,18 +122,18 @@ if (DEBUG_LOG_EVERY_REQUEST) {
 const getDb = () => db;
 globalThis.__db = db;
 
-await webserver.hmssRoutes(app, getDb, JPI_Version, port)
+await webserver.hmssRoutes(app, getDb, JPI_Version, port, mediaDirs)
 
 // Host jellyfin-web for Jellyfin Mobile
 app.use("/web", express.static("web"));
 
-await webserver.jellyfinRoutes(app) 
+await webserver.jellyfinRoutes(app)
 await webserver.addonRoutes(app)
 
 import { WebSocketServer } from "ws";
 
 const server = app.listen(port, "0.0.0.0", () => {
-  console.log(`HMSS listening on port ${port}`);
+    console.log(`HMSS listening on port ${port}`);
 });
 
 const wss = new WebSocketServer({ server, path: "/socket" });
@@ -214,14 +216,14 @@ wss.on("connection", (ws, req) => {
                     // unknown message type, ignore
                     break;
             }
-        } catch {}
+        } catch { }
     });
 
     ws.on("close", () => {
         if (periodicInterval) clearInterval(periodicInterval);
     });
 
-    ws.on("error", () => {});
+    ws.on("error", () => { });
 });
 
 function parsePeriodic(msg, callback) {
