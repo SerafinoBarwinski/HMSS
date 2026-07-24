@@ -1,14 +1,26 @@
 import { getAddons, getAddonsByCapability, searchAll } from "./addon_loader.js";
 import { authMiddleware, hmssAuthRoutes } from "./auth.js";
 import { getSystemInfo } from "./sql.js";
-import { suggestionsFromIndex } from "./jellyfin_items.js";
-import { readFile } from "node:fs/promises";
+import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, readMetaForDir } from "./jellyfin_items.js";
+import { probeMedia, generateItemId } from "./media_probe.js";
+import { getItemMeta } from "./meta_reader.js";
+import { readFile, writeFile } from "node:fs/promises";
+import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream } from "node:fs";
+import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 
 export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     app.use(authMiddleware(getDb));
     hmssAuthRoutes(app, getDb);
+
+    app.use((req, res, next) => {
+        if (req.path.startsWith("/System")) {
+            res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+            res.set("Pragma", "no-cache");
+        }
+        next();
+    });
 
     app.get("/", (req, res) => {
         res.redirect("/web/alt_index.html");
@@ -24,6 +36,297 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.status(204).end();
     });
 
+    app.get("/Items/:itemId/RemoteImages", async (req, res) => {
+        const imageType = req.query.type || "Primary";
+        const rawId = (req.params.itemId || "").replace(/-/g, "");
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const meta = findItemMetaById(rawId, index);
+        if (!meta?.tmdbId) return res.json({ Images: [], TotalRecordCount: 0, Providers: ["TheMovieDb", "Fanart"] });
+
+        const images = [];
+        const providers = getAddonsByCapability("artwork");
+        if (providers.length > 0) {
+            try {
+                const art = providers[0].module;
+                if (art.fetchArtwork) {
+                    const artwork = await art.fetchArtwork({ tmdbId: meta.tmdbId, type: meta.isShow ? "show" : "movie" });
+
+                    const typeMap = {
+                        Primary: "posters",
+                        Backdrop: "backgrounds",
+                        Art: "art",
+                        Logo: "logos",
+                        Banner: "banners",
+                        Disc: "discs",
+                        Thumb: "thumbs",
+                        Box: "boxes",
+                    };
+
+                    if (typeMap[imageType] === "posters" && artwork.posters) {
+                        for (const p of artwork.posters.slice(0, 30)) {
+                            images.push(makeImageEntry("Fanart", p.url, "Primary", p.likes, p.lang));
+                        }
+                    }
+                    if (typeMap[imageType] === "backgrounds" && artwork.backgrounds) {
+                        for (const bg of artwork.backgrounds.slice(0, 30)) {
+                            images.push(makeImageEntry("Fanart", bg.url, "Backdrop", bg.likes, "en"));
+                        }
+                    }
+                    if (typeMap[imageType] === "logos" && artwork.logos) {
+                        for (const l of artwork.logos.slice(0, 30)) {
+                            images.push(makeImageEntry("Fanart", l.url, "Logo", 0, "en"));
+                        }
+                    }
+                    if (typeMap[imageType] === "banners" && artwork.banners) {
+                        for (const b of artwork.banners.slice(0, 30)) {
+                            images.push(makeImageEntry("Fanart", b.url, "Banner", b.likes, b.lang));
+                        }
+                    }
+                    if (typeMap[imageType] === "discs" && artwork.discs) {
+                        for (const d of artwork.discs.slice(0, 30)) {
+                            images.push(makeImageEntry("Fanart", d.url, "Disc", d.likes, "en"));
+                        }
+                    }
+                    if (typeMap[imageType] === "thumbs" && artwork.thumbs) {
+                        for (const t of artwork.thumbs.slice(0, 30)) {
+                            images.push(makeImageEntry("Fanart", t.url, "Thumb", t.likes, t.lang));
+                        }
+                    }
+                    // Art = clearart/logos
+                    if (typeMap[imageType] === "art" && artwork.logos) {
+                        for (const l of artwork.logos.slice(0, 30)) {
+                            images.push(makeImageEntry("Fanart", l.url, "Art", 0, "en"));
+                        }
+                    }
+                }
+            } catch {}
+        }
+
+        const filtered = images.filter(i => i.Type === imageType);
+        res.json({ Images: filtered, TotalRecordCount: filtered.length, Providers: ["TheMovieDb", "Fanart"] });
+    });
+
+    function makeImageEntry(provider, url, type, likes, lang) {
+        return {
+            ProviderName: provider,
+            Url: url,
+            ThumbnailUrl: url,
+            Height: 0, Width: 0,
+            CommunityRating: likes || 0,
+            VoteCount: likes || 0,
+            Language: lang || "en",
+            Type: type,
+            RatingType: "Likes",
+        };
+    }
+
+    function findItemMetaById(rawId, index) {
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) {
+                const meta = readMetaForDir(`media/shows/${ep.showName}`);
+                return { tmdbId: meta?.tmdb_id, isShow: true };
+            }
+            if (generateItemId(ep.showName) === rawId) {
+                const meta = readMetaForDir(`media/shows/${ep.showName}`);
+                return { tmdbId: meta?.tmdb_id, isShow: true };
+            }
+        }
+        for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) {
+                const dir = m.filePath.substring(0, m.filePath.lastIndexOf("/"));
+                const meta = readMetaForDir(dir);
+                return { tmdbId: meta?.tmdb_id, isShow: false };
+            }
+        }
+        return null;
+    }
+
+    app.get("/Items/:itemId/Images", (req, res) => {
+        const rawId = (req.params.itemId || "").replace(/-/g, "");
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        let filePath = null;
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) { filePath = ep.filePath; break; }
+            if (generateItemId(ep.showName) === rawId) { filePath = `media/shows/${ep.showName}`; break; }
+        }
+        if (!filePath) for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { filePath = m.filePath; break; }
+        }
+        if (!filePath) for (const m of index.music || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { filePath = m.filePath; break; }
+        }
+        if (!filePath) return res.json([]);
+
+        const poster = findPosterPath(filePath);
+        if (!poster) return res.json([]);
+
+        try {
+            const s = statSync(poster.path);
+            res.json([{
+                ImageType: "Primary",
+                ImageIndex: 0,
+                ImageTag: poster.tag,
+                Path: poster.path,
+                Height: 0,
+                Width: 0,
+                Size: s.size,
+            }]);
+        } catch {
+            res.json([]);
+        }
+    });
+
+    app.get("/Items/:itemId/RemoteImages/Providers", (req, res) => {
+        res.json([
+            { Name: "TheMovieDb", SupportedImages: ["Primary", "Backdrop", "Logo", "Banner", "Thumb"] },
+            { Name: "Fanart", SupportedImages: ["Primary", "Backdrop", "Logo", "Banner", "Thumb"] },
+        ]);
+    });
+
+    app.get("/Items/:itemId/Images/Primary", (req, res) => {
+        serveItemImage(req, res, "Primary");
+    });
+
+    app.get("/Users/:userId/Items/:itemId/Images/Primary", (req, res) => {
+        serveItemImage(req, res, "Primary");
+    });
+
+    app.get("/web/ConfigurationPages", (req, res) => {
+        const addons = getAddons();
+        res.json(addons.map(a => ({
+            Name: a.name,
+            DisplayName: a.name,
+            Description: a.description || "",
+            EnableInMainMenu: true,
+            MenuSection: "plugins",
+            MenuIcon: "web_asset",
+            PluginId: a.id,
+        })));
+    });
+
+    app.get("/web/ConfigurationPage", (req, res) => {
+        const name = req.query.name;
+        if (!name) return res.status(400).end();
+
+        const addons = getAddons();
+        const addon = addons.find(a => a.id === name || a.name === name);
+        if (!addon) return res.status(404).end();
+
+        const fields = Object.entries(addon.configSchema || {}).map(([k, v]) => `
+            <div class="inputContainer">
+                <input is="emby-input" type="text" id="${k}" label="${v.label || k}" />
+                <div class="fieldDescription">${v.description || ""}</div>
+            </div>
+        `).join("");
+
+        const configKeys = Object.keys(addon.configSchema || {});
+        const configObj = {};
+        for (const k of configKeys) configObj[k] = addon.config[k] || "";
+
+        res.set("Content-Type", "text/html").send(`<!DOCTYPE html>
+<html><head><title>${addon.name}</title></head>
+<body>
+<div class="page type-interior pluginConfigurationPage configPage" data-role="page"
+     data-require="emby-input,emby-button">
+  <div data-role="content">
+    <div class="content-primary">
+      <h1>${addon.name} v${addon.version}</h1>
+      <p>${addon.description}</p>
+      <form class="configForm">
+        ${fields}
+        <br/>
+        <div>
+          <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    var PluginConfig = { pluginId: "${addon.id}" };
+
+    document.querySelector('.configPage')
+      .addEventListener('pageshow', function () {
+        Dashboard.showLoadingMsg();
+        ApiClient.getPluginConfiguration(PluginConfig.pluginId).then(function (config) {
+          ${configKeys.map(k => `
+            var el_${k} = document.querySelector('#${k}');
+            if (el_${k}) { el_${k}.value = config.${k} || ''; el_${k}.dispatchEvent(new Event('change',{bubbles:true,cancelable:false})); }
+          `).join("\n")}
+          Dashboard.hideLoadingMsg();
+        });
+      });
+
+    document.querySelector('.configForm')
+      .addEventListener('submit', function (e) {
+        e.preventDefault();
+        Dashboard.showLoadingMsg();
+        ApiClient.getPluginConfiguration(PluginConfig.pluginId).then(function (config) {
+          ${configKeys.map(k => `config.${k} = (document.querySelector('#${k}') || {}).value || '';`).join("\n")}
+          ApiClient.updatePluginConfiguration(PluginConfig.pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+        });
+        return false;
+      });
+  </script>
+</div>
+</body></html>`);
+    });
+
+    app.get("/Plugins/:pluginId/Configuration", (req, res) => {
+        const addons = getAddons();
+        const addon = addons.find(a => a.id === req.params.pluginId || a.name === req.params.pluginId);
+        if (!addon) return res.status(404).json({ error: "Plugin not found" });
+        res.json(addon.config);
+    });
+
+    app.post("/Plugins/:pluginId/Configuration", async (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
+        const addons = getAddons();
+        const addon = addons.find(a => a.id === req.params.pluginId || a.name === req.params.pluginId);
+        if (!addon) return res.status(404).json({ error: "Plugin not found" });
+
+        const addonDir = `src/addons/${req.params.pluginId}`;
+        try {
+            const existing = JSON.parse(await readFile(`${addonDir}/override.json`, "utf-8").catch(() => "{}"));
+            Object.assign(existing, req.body);
+            await writeFile(`${addonDir}/override.json`, JSON.stringify(existing, null, 2));
+            res.json({ Configuration: { ...existing } });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    function serveItemImage(req, res, imageType) {
+        const rawId = (req.params.itemId || "").replace(/-/g, "");
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        let filePath = null;
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) { filePath = ep.filePath; break; }
+            if (generateItemId(ep.showName) === rawId) { filePath = ep.filePath; break; }
+        }
+        if (!filePath) for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { filePath = m.filePath; break; }
+        }
+        if (!filePath) for (const m of index.music || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { filePath = m.filePath; break; }
+        }
+        if (!filePath) return res.status(404).end();
+
+        const poster = findPosterPath(filePath);
+        if (!poster) return res.status(404).end();
+
+        try {
+            const s = statSync(poster.path);
+            const ext = poster.path.split(".").pop();
+            const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+            res.set("Content-Type", mime);
+            res.set("Content-Length", s.size);
+            createReadStream(poster.path).pipe(res);
+        } catch {
+            res.status(404).end();
+        }
+    }
+
     app.get("/Localization/Options", async (req, res) => {
         const data = await readFile(new URL("./localization.json", import.meta.url), "utf-8");
         res.json(JSON.parse(data));
@@ -37,6 +340,201 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     app.get("/Localization/Countries", async (req, res) => {
         const data = await readFile(new URL("./countries.json", import.meta.url), "utf-8");
         res.json(JSON.parse(data));
+    });
+
+    app.get("/System/Configuration", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const db = getDb();
+        const sys = getSystemInfo(db);
+        res.json({
+            LogFileRetentionDays: 7,
+            IsStartupWizardCompleted: sys ? Boolean(sys.startup_wizard_completed) : false,
+            ServerName: sys?.server_name || os.hostname(),
+            UICulture: "en-US",
+            PreferredMetadataLanguage: "en",
+            MetadataCountryCode: "US",
+            QuickConnectAvailable: true,
+            EnableCaseSensitiveItemIds: false,
+            MinResumePct: 5,
+            MaxResumePct: 95,
+            MinResumeDurationSeconds: 300,
+            ImageSavingConvention: "Legacy",
+            EnableFolderView: false,
+            EnableGroupingMoviesIntoCollections: false,
+            EnableGroupingShowsIntoCollections: false,
+            EnableLegacyAuthorization: false,
+            ActivityLogRetentionDays: 30,
+        });
+    });
+
+    app.post("/System/Configuration", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const db = getDb();
+        const { ServerName, UICulture } = req.body || {};
+        if (ServerName) {
+            db.prepare("UPDATE system SET server_name = ?").run(ServerName);
+        }
+        res.status(200).end();
+    });
+
+    app.get("/System/Info/Storage", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+
+        const getFolder = (p) => {
+            try {
+                const s = statSync(p);
+                let free = 0, used = s.size || 0;
+                try {
+                    const fs = statfsSync(p);
+                    free = fs.bsize * fs.bfree;
+                    used = fs.bsize * (fs.blocks - fs.bfree);
+                } catch {}
+                return { Path: path.resolve(p), FreeSpace: free, UsedSpace: used, StorageType: "FileSystem", DeviceId: "local" };
+            } catch { return { Path: p, FreeSpace: 0, UsedSpace: 0, StorageType: "FileSystem", DeviceId: "local" }; }
+        };
+
+        const libraries = [];
+        for (const [key, paths] of Object.entries(mediaDirs)) {
+            for (const p of paths) {
+                libraries.push({
+                    Id: generateItemId(p),
+                    Name: key.charAt(0).toUpperCase() + key.slice(1),
+                    Folders: [getFolder(p)]
+                });
+            }
+        }
+
+        res.json({
+            ProgramDataFolder: getFolder("."),
+            WebFolder: getFolder("web"),
+            ImageCacheFolder: getFolder("src/backend/profilepictures"),
+            CacheFolder: getFolder("."),
+            LogFolder: getFolder("src/backend/logs"),
+            InternalMetadataFolder: getFolder("media"),
+            TranscodingTempFolder: getFolder("."),
+            Libraries: libraries,
+        });
+    });
+
+    app.get("/Plugins", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const addons = getAddons();
+        res.json(addons.map(a => ({
+            Name: a.name,
+            Version: a.version,
+            Description: a.description || "",
+            Id: crypto.randomUUID(),
+            CanUninstall: false,
+            HasImage: false,
+            Status: "Active",
+        })));
+    });
+
+    app.get("/Packages", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const addons = getAddons();
+        res.json(addons.map(a => ({
+            name: a.name,
+            description: a.description || "",
+            overview: a.description || "",
+            owner: "HMSS",
+            category: a.capabilities.join(", "),
+            guid: crypto.randomUUID(),
+            versions: [{
+                version: a.version,
+                VersionNumber: a.version,
+                changelog: "",
+                targetAbi: "10.11.11",
+                sourceUrl: "",
+                checksum: "",
+                timestamp: new Date().toISOString(),
+                repositoryName: "HMSS",
+                repositoryUrl: "",
+            }],
+            imageUrl: "",
+        })));
+    });
+
+    app.get("/System/Endpoint", (req, res) => {
+        const ip = req.ip || req.socket.remoteAddress || "";
+        const isLocal = ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip === "localhost";
+        const localIP = getLocalIPv4();
+        let isInNetwork = isLocal;
+        if (!isInNetwork && localIP && ip) {
+            const clientParts = ip.replace("::ffff:", "").split(".");
+            const serverParts = localIP.split(".");
+            if (clientParts.length === 4 && serverParts.length === 4) {
+                isInNetwork = clientParts[0] === serverParts[0] && clientParts[1] === serverParts[1] && clientParts[2] === serverParts[2];
+            }
+        }
+        res.json({ IsLocal: isLocal, IsInNetwork: isInNetwork });
+    });
+
+    app.get("/System/Logs/Log", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const name = req.query.name || "server.log";
+        const fp = path.join("src/backend/logs", path.basename(name));
+        if (!existsSync(fp)) return res.status(404).end();
+        res.set("Content-Type", "text/plain; charset=utf-8");
+        res.sendFile(path.resolve(fp));
+    });
+
+    app.get("/System/Logs", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const logDir = "src/backend/logs";
+        const list = [];
+        try {
+            const files = readdirSync(logDir).filter(f => f.endsWith(".log"));
+            for (const file of files) {
+                const fp = path.join(logDir, file);
+                const s = statSync(fp);
+                list.push({
+                    Name: file,
+                    Size: s.size,
+                    DateCreated: s.birthtime.toISOString(),
+                    DateModified: s.mtime.toISOString(),
+                });
+            }
+        } catch {}
+        res.json(list);
+    });
+
+    app.get("/System/ActivityLog/Entries", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const startIndex = parseInt(req.query.startIndex) || 0;
+        const limit = Math.min(parseInt(req.query.limit) || 7, 50);
+        const minDate = req.query.minDate ? new Date(req.query.minDate) : null;
+
+        const entries = [];
+        const logDir = "src/backend/logs";
+        try {
+            const logFiles = readdirSync(logDir).filter(f => f.endsWith(".log"));
+            for (const file of logFiles) {
+                const content = readFileSync(path.join(logDir, file), "utf-8");
+                const lines = content.split("\n").filter(Boolean);
+                for (const line of lines) {
+                    const match = line.match(/^\[([^\]]+)\] \[([A-Z]+)\] (.+)$/);
+                    if (!match) continue;
+                    const date = new Date(match[1]);
+                    if (minDate && date < minDate) continue;
+                    entries.push({
+                        Id: entries.length,
+                        Name: match[3].substring(0, 80),
+                        Overview: match[3],
+                        ShortOverview: match[3].substring(0, 40),
+                        Type: match[2],
+                        ItemId: null,
+                        Date: date.toISOString(),
+                        UserId: null,
+                        Severity: match[2] === "ERROR" ? "Error" : match[2] === "WARN" ? "Warning" : "Information",
+                    });
+                }
+            }
+        } catch {}
+
+        const total = entries.length;
+        const sliced = entries.slice(startIndex, startIndex + limit);
+        res.json({ Items: sliced, TotalRecordCount: total, StartIndex: startIndex });
     });
 
     app.get("/Library/VirtualFolders", (req, res) => {
@@ -65,6 +563,76 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             }
         }
         res.json(result);
+    });
+
+    app.get("/Users/:userId/Items/Resume", (req, res) => {
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
+
+    app.get("/Users/:userId/Items/Latest", (req, res) => {
+        const sys = getSystemInfo(getDb());
+        const serverId = sys?.id || "hmss-local";
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const result = filteredItemsFromIndex(index, serverId, {
+            parentId: req.query.parentId || req.query.ParentId,
+            includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
+            limit: req.query.limit || req.query.Limit || 16,
+            startIndex: req.query.startIndex || req.query.StartIndex,
+        });
+        res.json(result);
+    });
+
+    app.get("/Users/:userId/Items/:collectionType", async (req, res) => {
+        const { collectionType } = req.params;
+        // if it looks like an item ID (32-char hex or UUID), serve item detail
+        if (collectionType.length >= 32 && /^[0-9a-f-]+$/.test(collectionType)) {
+            req.params.itemId = collectionType;
+            return serveItemDetail(req, res, getDb());
+        }
+        const sys = getSystemInfo(getDb());
+        const serverId = sys?.id || "hmss-local";
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+
+        const typeMap = { movies: "movie", tvshows: "shows", shows: "shows", music: "music", mixed: "unsorted" };
+        const sourceKey = typeMap[collectionType];
+        if (!sourceKey || !mediaDirs[sourceKey]) return res.status(404).json({ error: "Collection not found." });
+        const nameMap = { movies: "Movies", tvshows: "Shows", shows: "Shows", music: "Music", mixed: "Unsorted" };
+
+        let childCount = 0;
+        if (sourceKey === "movie") childCount = index.movies?.length || 0;
+        else if (sourceKey === "shows") childCount = [...new Set(index.shows?.map(s => s.showName) || [])].length;
+        else if (sourceKey === "music") childCount = index.music?.length || 0;
+
+        const itemId = crypto.randomUUID();
+        res.json({
+            Name: nameMap[collectionType] || sourceKey,
+            ServerId: serverId,
+            Id: itemId.replace(/-/g, ""),
+            DateCreated: new Date().toISOString(),
+            CanDelete: false,
+            CanDownload: false,
+            SortName: (nameMap[collectionType] || sourceKey).toLowerCase(),
+            ExternalUrls: [],
+            Path: mediaDirs[sourceKey][0] || "",
+            ChannelId: null,
+            IsFolder: true,
+            Type: "CollectionFolder",
+            CollectionType: collectionType,
+            ChildCount: childCount,
+            UserData: {
+                PlaybackPositionTicks: 0,
+                PlayCount: 0,
+                IsFavorite: false,
+                Played: false,
+                Key: itemId,
+                ItemId: itemId.replace(/-/g, ""),
+            },
+            ImageTags: {},
+            BackdropImageTags: [],
+            ImageBlurHashes: {},
+            LocationType: "FileSystem",
+            MediaType: "Unknown",
+        });
     });
 
     app.get("/Environment/Drives", (req, res) => {
@@ -382,24 +950,157 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
-        const result = suggestionsFromIndex(index, req.query.userId, serverId, 100);
+        const result = filteredItemsFromIndex(index, serverId, {
+            parentId: req.query.parentId || req.query.ParentId,
+            includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
+            limit: req.query.limit || req.query.Limit,
+            startIndex: req.query.startIndex || req.query.StartIndex,
+        });
         res.json(result);
     });
 
-    app.get("/Items/:itemId", (req, res) => {
+    app.get("/Users/:userId/Items", (req, res) => {
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
-        const result = suggestionsFromIndex(index, null, serverId, 100);
-        const rawId = req.params.itemId.replace(/-/g, "");
-        const item = result.Items.find(i => i.Id === rawId);
-        if (!item) return res.status(404).json({ error: "Item not found." });
-        res.json(item);
+        const result = filteredItemsFromIndex(index, serverId, {
+            parentId: req.query.parentId || req.query.ParentId,
+            includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
+            limit: req.query.limit || req.query.Limit,
+            startIndex: req.query.startIndex || req.query.StartIndex,
+        });
+        res.json(result);
     });
 
-    app.get("/UserItems/Resume", (req, res) => {
-        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    app.get("/Items/:itemId", async (req, res) => {
+        return serveItemDetail(req, res, getDb());
     });
+
+    app.get("/Users/:userId/Items/:itemId", async (req, res) => {
+        return serveItemDetail(req, res, getDb());
+    });
+
+    async function serveItemDetail(req, res, db) {
+        const sys = getSystemInfo(db);
+        const serverId = sys?.id || "hmss-local";
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const rawId = req.params.itemId.replace(/-/g, "");
+        let found = null;
+        let itemPath = null;
+        let itemType = null;
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) { found = ep; itemPath = ep.filePath; itemType = "Episode"; break; }
+            if (generateItemId(ep.showName) === rawId) { found = ep; itemType = "Series"; break; }
+        }
+        if (!found) for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { found = m; itemPath = m.filePath; itemType = "Movie"; break; }
+        }
+        if (!found) for (const m of index.music || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { found = m; itemPath = m.filePath; itemType = "Audio"; break; }
+        }
+        // check if it's a season folder
+        if (!found && index.shows?.length > 0) {
+            for (const ep of index.shows) {
+                const seasonId = generateItemId(`${ep.showName}-s${ep.season}`);
+                if (seasonId === rawId) {
+                    found = ep;
+                    itemType = "Season";
+                    break;
+                }
+            }
+        }
+        if (!found) return res.status(404).json({ error: "Item not found." });
+
+        let probe = null;
+        if (itemPath && (itemPath.endsWith(".mp4") || itemPath.endsWith(".mkv") || itemPath.endsWith(".m4a") || itemPath.endsWith(".mp3"))) {
+            try { probe = await probeMedia(itemPath); } catch {}
+        }
+
+        const id = generateItemId(found.id || found.filePath);
+        if (itemType === "Season") {
+            const seasonId = generateItemId(`${found.showName}-s${found.season}`);
+            return res.json({
+                Name: found.season === 0 ? "Specials" : `Season ${found.season}`,
+                ServerId: serverId,
+                Id: seasonId,
+                SortName: `Season ${String(found.season).padStart(2, "0")}`,
+                IndexNumber: found.season,
+                SeriesName: found.showName,
+                SeriesId: generateItemId(found.showName),
+                IsFolder: true,
+                Type: "Season",
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: seasonId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"), ItemId: seasonId },
+                ImageTags: {},
+                BackdropImageTags: [],
+                ImageBlurHashes: {},
+                LocationType: "FileSystem",
+            });
+        }
+        const parentId = itemType === "Movie" ? generateItemId("movies") : itemType === "Episode" ? generateItemId(found.showName) : generateItemId("music");
+        const isMovie = itemType === "Movie";
+        const isEpisode = itemType === "Episode";
+
+        const mediaSource = probe ? {
+            Protocol: "File",
+            Id: id,
+            Path: itemPath,
+            Type: "Default",
+            Container: probe.container,
+            Size: probe.size,
+            Name: found.title || "Unknown",
+            IsRemote: false,
+            RunTimeTicks: Math.round(probe.duration * 10000000),
+            SupportsTranscoding: true,
+            SupportsDirectStream: true,
+            SupportsDirectPlay: true,
+            VideoType: isMovie || isEpisode ? "VideoFile" : undefined,
+            MediaStreams: probe.streams,
+            Bitrate: probe.bitrate,
+            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio"),
+            HasSegments: false,
+        } : null;
+
+        const poster = findPosterPath(itemPath);
+        const meta = getItemMeta(itemPath);
+
+        res.json({
+            Name: meta?.name || found.title || "Unknown",
+            Overview: meta?.overview || undefined,
+            Genres: meta?.genres || [],
+            ProductionYear: meta?.year || found.year || undefined,
+            ServerId: serverId,
+            Id: id,
+            SortName: (found.title || "").toLowerCase(),
+            Path: itemPath || "",
+            ChannelId: null,
+            IsFolder: itemType === "Series",
+            Type: itemType || "Unknown",
+            ParentId: parentId,
+            Container: probe?.container,
+            RunTimeTicks: probe ? Math.round(probe.duration * 10000000) : 0,
+            Width: probe?.width || 0,
+            Height: probe?.height || 0,
+            IsHD: (probe?.height || 0) >= 720,
+            MediaSources: mediaSource ? [mediaSource] : [],
+            MediaStreams: probe?.streams || [],
+            UserData: {
+                PlaybackPositionTicks: 0,
+                PlayCount: 0,
+                IsFavorite: false,
+                Played: false,
+                Key: id.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"),
+                ItemId: id,
+            },
+            ImageTags: poster ? { Primary: poster.tag } : {},
+            BackdropImageTags: [],
+            ImageBlurHashes: poster ? { Primary: {} } : {},
+            LocationType: "FileSystem",
+            MediaType: isMovie || isEpisode ? "Video" : "Audio",
+            VideoType: isMovie || isEpisode ? "VideoFile" : undefined,
+            PrimaryImageAspectRatio: probe?.width && probe?.height ? probe.width / probe.height : 0,
+        });
+    }
+
 }
 
 export async function addonRoutes(app) {
@@ -432,12 +1133,75 @@ export async function jellyfinRoutes(app) {
     app.get('/Artists/:name', (req, res) => { /* GetArtistByName */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Audio ===
-    app.get('/Audio/:itemId/stream.:container', (req, res) => { /* GetAudioStreamByContainer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.head('/Audio/:itemId/stream.:container', (req, res) => { /* HeadAudioStreamByContainer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Audio/:itemId/stream', (req, res) => { /* GetAudioStream */ res.status(200).json({ message: 'Not implemented' }); });
-    app.head('/Audio/:itemId/stream', (req, res) => { /* HeadAudioStream */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Audio/:itemId/universal', (req, res) => { /* GetUniversalAudioStream */ res.status(200).json({ message: 'Not implemented' }); });
-    app.head('/Audio/:itemId/universal', (req, res) => { /* HeadUniversalAudioStream */ res.status(200).json({ message: 'Not implemented' }); });
+    const MIME_TYPES = {
+        mp3: "audio/mpeg", m4a: "audio/mp4", flac: "audio/flac",
+        ogg: "audio/ogg", wav: "audio/wav", aac: "audio/aac",
+        mkv: "video/x-matroska", mp4: "video/mp4", avi: "video/x-msvideo",
+        mov: "video/quicktime", ts: "video/mp2t", webm: "video/webm",
+        mpegts: "video/mp2t",
+    };
+
+    function findFileByItemId(itemId) {
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const rawId = (itemId || "").replace(/-/g, "");
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) return ep.filePath;
+        }
+        for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) return m.filePath;
+        }
+        for (const m of index.music || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) return m.filePath;
+        }
+        return null;
+    }
+
+    function streamFile(req, res, itemId) {
+        const filePath = findFileByItemId(itemId);
+        if (!filePath) return res.status(404).json({ error: "Item not found." });
+
+        let stat;
+        try { stat = statSync(filePath); } catch { return res.status(404).json({ error: "File not found." }); }
+
+        const ext = filePath.split(".").pop().toLowerCase();
+        const contentType = MIME_TYPES[ext] || "application/octet-stream";
+        const totalSize = stat.size;
+
+        if (req.method === "HEAD") {
+            res.writeHead(200, { "Content-Length": totalSize, "Content-Type": contentType, "Accept-Ranges": "bytes" });
+            return res.end();
+        }
+
+        const range = req.headers.range;
+        if (range) {
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : Math.min(start + 10000000 - 1, totalSize - 1);
+            const chunkSize = end - start + 1;
+
+            res.writeHead(206, {
+                "Content-Range": `bytes ${start}-${end}/${totalSize}`,
+                "Accept-Ranges": "bytes",
+                "Content-Length": chunkSize,
+                "Content-Type": contentType,
+            });
+            createReadStream(filePath, { start, end }).pipe(res);
+        } else {
+            res.writeHead(200, {
+                "Content-Length": totalSize,
+                "Content-Type": contentType,
+                "Accept-Ranges": "bytes",
+            });
+            createReadStream(filePath).pipe(res);
+        }
+    }
+
+    app.get('/Audio/:itemId/stream.:container', (req, res) => streamFile(req, res, req.params.itemId));
+    app.head('/Audio/:itemId/stream.:container', (req, res) => streamFile(req, res, req.params.itemId));
+    app.get('/Audio/:itemId/stream', (req, res) => streamFile(req, res, req.params.itemId));
+    app.head('/Audio/:itemId/stream', (req, res) => streamFile(req, res, req.params.itemId));
+    app.get('/Audio/:itemId/universal', (req, res) => streamFile(req, res, req.params.itemId));
+    app.head('/Audio/:itemId/universal', (req, res) => streamFile(req, res, req.params.itemId));
 
     // === Authentication ===
     app.get('/Auth/Keys', (req, res) => { /* GetKeys */ res.status(200).json({ message: 'Not implemented' }); });
@@ -575,7 +1339,7 @@ export async function jellyfinRoutes(app) {
     app.get('/Items/:itemId/Collections', (req, res) => { /* GetItemCollections */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Download', (req, res) => { /* GetDownload */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/File', (req, res) => { /* GetFile */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/:itemId/Intros', (req, res) => { /* GetIntros */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Users/:itemId/Items/:itemId/Intros', (req, res) => { /* GetIntros */ res.status(200).json({"Items":[],"TotalRecordCount":0,"StartIndex":0}); });
     app.get('/Items/:itemId/LocalTrailers', (req, res) => { /* GetLocalTrailers */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Items/:itemId/Refresh', (req, res) => { /* RefreshItem */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Similar', (req, res) => { /* GetSimilarItems */ res.status(200).json({ message: 'Not implemented' }); });
@@ -662,11 +1426,91 @@ export async function jellyfinRoutes(app) {
     app.get('/Providers/Lyrics/:lyricId', (req, res) => { /* GetRemoteLyrics */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === MediaInfo ===
-    app.get('/Items/:itemId/PlaybackInfo', (req, res) => { /* GetPlaybackInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Items/:itemId/PlaybackInfo', (req, res) => { /* GetPostedPlaybackInfo */ res.status(200).json({ message: 'Not implemented' }); });
+    async function findItemForPlayback(req) {
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const rawId = (req.params.itemId || "").replace(/-/g, "");
+        let found = null, itemPath = null, itemType = null;
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) { found = ep; itemPath = ep.filePath; itemType = "Episode"; break; }
+            if (generateItemId(ep.showName) === rawId) { found = ep; itemType = "Series"; break; }
+        }
+        if (!found) for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { found = m; itemPath = m.filePath; itemType = "Movie"; break; }
+        }
+        if (!found) for (const m of index.music || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) { found = m; itemPath = m.filePath; itemType = "Audio"; break; }
+        }
+        if (!found && index.shows?.length > 0) {
+            for (const ep of index.shows) {
+                const seasonId = generateItemId(`${ep.showName}-s${ep.season}`);
+                if (seasonId === rawId) { found = ep; itemType = "Season"; break; }
+            }
+        }
+        if (!found) return null;
+
+        let probe = null;
+        if (itemPath && /\.(mp4|mkv|m4a|mp3|avi|mov|ts|flac|ogg)$/i.test(itemPath)) {
+            try { probe = await probeMedia(itemPath); } catch {}
+        }
+        return { found, itemPath, itemType, probe };
+    }
+
+    function buildMediaSource(found, itemPath, id, probe, itemType) {
+        if (!probe) return null;
+        const isVideo = itemType === "Episode" || itemType === "Movie";
+        return {
+            Protocol: "File",
+            Id: id,
+            Path: itemPath,
+            Type: "Default",
+            Container: probe.container,
+            Size: probe.size,
+            Name: found.title || "Unknown",
+            IsRemote: false,
+            RunTimeTicks: Math.round(probe.duration * 10000000),
+            SupportsTranscoding: true,
+            SupportsDirectStream: true,
+            SupportsDirectPlay: true,
+            VideoType: isVideo ? "VideoFile" : undefined,
+            MediaStreams: probe.streams,
+            Bitrate: probe.bitrate,
+            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio"),
+            HasSegments: false,
+        };
+    }
+
+    function buildPlaybackInfoResponse(mediaSource) {
+        return {
+            MediaSources: mediaSource ? [mediaSource] : [],
+            PlaySessionId: crypto.randomUUID(),
+            ErrorCode: null,
+        };
+    }
+
+    app.get('/Items/:itemId/PlaybackInfo', async (req, res) => {
+        const item = await findItemForPlayback(req);
+        if (!item) return res.status(404).json({ error: "Item not found." });
+        const id = generateItemId(item.found.id || item.found.filePath);
+        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType);
+        res.json(buildPlaybackInfoResponse(mediaSource));
+    });
+
+    app.post('/Items/:itemId/PlaybackInfo', async (req, res) => {
+        const item = await findItemForPlayback(req);
+        if (!item) return res.status(404).json({ error: "Item not found." });
+        const id = generateItemId(item.found.id || item.found.filePath);
+        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType);
+        res.json(buildPlaybackInfoResponse(mediaSource));
+    });
     app.post('/LiveStreams/Close', (req, res) => { /* CloseLiveStream */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/LiveStreams/Open', (req, res) => { /* OpenLiveStream */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Playback/BitrateTest', (req, res) => { /* GetBitrateTestBytes */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Playback/BitrateTest', (req, res) => {
+        const size = Math.min(parseInt(req.query.Size) || 500000, 10000000);
+        const buf = crypto.randomBytes(size);
+        res.set("Content-Type", "application/octet-stream");
+        res.set("Content-Length", size);
+        res.send(buf);
+    });
 
     // === MediaSegment ===
     app.get('/MediaSegments/:itemId', (req, res) => { /* GetItemSegments */ res.status(200).json({ message: 'Not implemented' }); });
@@ -701,8 +1545,6 @@ export async function jellyfinRoutes(app) {
     app.get('/Packages/:name', (req, res) => { /* GetPackageInfo */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Plugins', (req, res) => { /* GetPlugins */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Plugins/:pluginId', (req, res) => { /* UninstallPlugin */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Plugins/:pluginId/Configuration', (req, res) => { /* GetPluginConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Plugins/:pluginId/Configuration', (req, res) => { /* UpdatePluginConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Plugins/:pluginId/Manifest', (req, res) => { /* GetPluginManifest */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Plugins/:pluginId/:version', (req, res) => { /* UninstallPluginByVersion */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Plugins/:pluginId/:version/Disable', (req, res) => { /* DisablePlugin */ res.status(200).json({ message: 'Not implemented' }); });
@@ -710,8 +1552,6 @@ export async function jellyfinRoutes(app) {
     app.get('/Plugins/:pluginId/:version/Image', (req, res) => { /* GetPluginImage */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Repositories', (req, res) => { /* GetRepositories */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Repositories', (req, res) => { /* SetRepositories */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/web/ConfigurationPage', (req, res) => { /* GetDashboardConfigurationPage */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/web/ConfigurationPages', (req, res) => { /* GetConfigurationPages */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === RemoteImage ===
     app.get('/Items/:itemId/RemoteImages', (req, res) => { /* GetRemoteImages */ res.status(200).json({ message: 'Not implemented' }); });
@@ -719,7 +1559,10 @@ export async function jellyfinRoutes(app) {
     app.get('/Items/:itemId/RemoteImages/Providers', (req, res) => { /* GetRemoteImageProviders */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === ScheduledTask ===
-    app.get('/ScheduledTasks', (req, res) => { /* GetTasks */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/ScheduledTasks', (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
+        res.json([]);
+    });
     app.delete('/ScheduledTasks/Running/:taskId', (req, res) => { /* StopTask */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/ScheduledTasks/Running/:taskId', (req, res) => { /* StartTask */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/ScheduledTasks/:taskId', (req, res) => { /* GetTask */ res.status(200).json({ message: 'Not implemented' }); });
@@ -857,10 +1700,10 @@ export async function jellyfinRoutes(app) {
     app.post('/Videos/MergeVersions', (req, res) => { /* MergeVersions */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Videos/:itemId/AdditionalParts', (req, res) => { /* GetAdditionalPart */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Videos/:itemId/AlternateSources', (req, res) => { /* DeleteAlternateSources */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Videos/:itemId/stream.:container', (req, res) => { /* GetVideoStreamByContainer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.head('/Videos/:itemId/stream.:container', (req, res) => { /* HeadVideoStreamByContainer */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Videos/:itemId/stream', (req, res) => { /* GetVideoStream */ res.status(200).json({ message: 'Not implemented' }); });
-    app.head('/Videos/:itemId/stream', (req, res) => { /* HeadVideoStream */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Videos/:itemId/stream.:container', (req, res) => streamFile(req, res, req.params.itemId));
+    app.head('/Videos/:itemId/stream.:container', (req, res) => streamFile(req, res, req.params.itemId));
+    app.get('/Videos/:itemId/stream', (req, res) => streamFile(req, res, req.params.itemId));
+    app.head('/Videos/:itemId/stream', (req, res) => streamFile(req, res, req.params.itemId));
     app.get('/Videos/:videoId/:mediaSourceId/Attachments/:index', (req, res) => { /* GetAttachment */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Year ===

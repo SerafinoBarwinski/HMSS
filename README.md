@@ -3,8 +3,9 @@
 A Jellyfin-compatible media streaming server you can host yourself. Built from the
 ground up in Node.js — no C#, no .NET, no legacy baggage.
 
-**Status: Experimental.** This is a work in progress. Things will break. It is
-not yet ready for daily use. Contributions and feedback welcome.
+**Status: Alpha.** Core functionality works — authentication, media browsing,
+metadata enrichment, artwork, and streaming all operational. More features
+coming steadily. Contributions and feedback welcome.
 
 ## Why?
 
@@ -38,13 +39,17 @@ npm run server
 The server starts on port 8000. Open `http://localhost:8000` in a browser or
 connect with Findroid / Jellyfin Mobile.
 
-Default login: `root` / `root`
+On first start, the Setup Wizard guides you through creating the admin account
+and configuring server settings.
 
 ## Addon Configuration
 
 API keys for metadata and artwork are configured through addon override files.
 Each addon in `src/addons/` has a `config.json` (schema + defaults) and an
 `override.json.example` (copy to `override.json` and fill in your keys).
+
+You can also configure addons directly through the **Jellyfin Web Dashboard**:
+go to **Dashboard → Plugins**, click on an addon, edit its settings, and save.
 
 **TMDB** (metadata for movies and shows):
 ```
@@ -79,31 +84,37 @@ The server scans these folders on startup. Metadata (`meta.yaml`) is written
 automatically. With API keys configured, HMSS fetches cover art, descriptions,
 and posters from TMDB and Fanart.tv.
 
-## What Works (So Far)
+## What Works
 
-- User authentication (password + Quick Connect)
-- Media scanning and indexing
-- Metadata enrichment (TMDB, MusicBrainz)
-- Artwork download (Fanart.tv)
-- Jellyfin-compatible REST API (partial)
-- jellyfin-web hosting (Jellyfin Mobile app works)
-- mDNS / UDP discovery on port 7359
-- WebSocket endpoint for real-time updates
-- Addon system with dependency resolution
+- **Authentication**: Password login, Quick Connect, Setup Wizard, sessions
+- **User Management**: Add/edit/remove users, profile pictures, permission system
+- **Media Browsing**: Full Jellyfin-compatible item listing, filtering, suggestions
+- **Media Playback**: Direct play streaming with Range support (seeking works)
+- **Metadata Enrichment**: TMDB (movies/shows), MusicBrainz (music), Fanart.tv (artwork)
+- **Addons**: Plugin system with config UI in Jellyfin Web Dashboard
+- **Media Scanning**: Threaded background scanning with metadata extraction (ffprobe)
+- **jellyfin-web**: Full web UI hosted, works with Jellyfin Mobile app
+- **Discovery**: mDNS/UDP on port 7359, WebSocket for real-time updates
+- **Localization**: Languages, cultures, countries served from API
+- **System Info**: Server info, ping, logging, activity log, disk stats
+- **Rate Limiting**: Per-IP request throttling, localhost exempt
+- **Spam Protection**: Configurable IP-based request limiting
 
 ## What's Next
 
-- Full media streaming and transcoding
-- Web-based admin dashboard
-- HMSS-native frontend
+- Transcoding support
 - Subtitle management
 - Live TV support
+- SyncPlay
+- Web-based admin dashboard enhancements
+- HMSS-native frontend
 
 ## API Compatibility
 
-HMSS implements a subset of the Jellyfin API. Not every endpoint is functional
-yet — stubs return HTTP 501. See `docs/jellyfin_compat.md` for details on
-client compatibility requirements (UUID formats, field ordering, header quirks).
+HMSS implements a large subset of the Jellyfin API. Most endpoints used by
+Jellyfin Mobile, Findroid, and other clients are functional. See
+`docs/jellyfin_compat.md` for details on client compatibility requirements
+(UUID formats, field ordering, header quirks).
 
 HMSS is not affiliated with or endorsed by the Jellyfin project. We implement
 API compatibility to leverage the existing ecosystem of clients.

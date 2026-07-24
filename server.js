@@ -63,6 +63,10 @@ console.log(figlet.textSync("HMSS", {
     whitespaceBreak: true,
 }));
 
+
+const addonConfig = {};
+const addons = await addonLoader.loadAddons(addonConfig);
+
 async function StartMediaIndex() {
     console.log("The indexer has started. This may take a while...")
     const index = await buildIndex(mediaDirs);
@@ -72,20 +76,14 @@ async function StartMediaIndex() {
 
     // write meta.yaml + download posters for already-organized content
     let orgResult;
-    if (index.shows.length > 0) orgResult = await organizeShows(index.shows, { enrich: false, artwork: false });
-    if (index.movies.length > 0) orgResult = await organizeMovies(index.movies, { enrich: false, artwork: false });
+    if (index.shows.length > 0) orgResult = await organizeShows(index.shows, { enrich: true, artwork: true });
+    if (index.movies.length > 0) orgResult = await organizeMovies(index.movies, { enrich: true, artwork: true });
     if (index.music.length > 0) orgResult = await organizeMusic(index.music);
 
     if (orgResult) console.log(`Organized: ${orgResult.length} metadata writes`);
     console.log("Indexer done")
     return index;
 }
-
-const mediaIndex = await StartMediaIndex();
-globalThis.__mediaIndex = mediaIndex;
-
-const addonConfig = {};
-const addons = await addonLoader.loadAddons(addonConfig);
 
 const app = express()
 app.disable("x-powered-by");
@@ -132,8 +130,15 @@ await webserver.addonRoutes(app)
 
 import { WebSocketServer } from "ws";
 
-const server = app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, "0.0.0.0", async () => {
     console.log(`HMSS listening on port ${port}`);
+
+    try {
+        const mediaIndex = await StartMediaIndex();
+        globalThis.__mediaIndex = mediaIndex;
+    } catch (err) {
+        console.error("Media-Index could not been created:", err);
+    }
 });
 
 const wss = new WebSocketServer({ server, path: "/socket" });

@@ -42,7 +42,7 @@ export async function fetchArtwork({ tmdbId, type }) {
     // posters
     const posterKey = type === "show" ? "tvposter" : "movieposter";
     if (data[posterKey]) {
-        for (const img of data[posterKey].slice(0, 3)) {
+        for (const img of data[posterKey]) {
             posters.push({ url: img.url, lang: img.lang, likes: img.likes });
         }
     }
@@ -50,21 +50,48 @@ export async function fetchArtwork({ tmdbId, type }) {
     // backgrounds / heroes
     const bgKey = type === "show" ? "showbackground" : "moviebackground";
     if (data[bgKey]) {
-        for (const img of (data[bgKey] || []).slice(0, 3)) {
+        for (const img of (data[bgKey] || [])) {
             backgrounds.push({ url: img.url, likes: img.likes });
         }
     }
 
-    // also check clearart/logos
+    // clearart / logos
     const clearArtKey = type === "show" ? "hdclearart" : "hdmovieclearart";
     const logos = [];
     if (data[clearArtKey]) {
-        for (const img of data[clearArtKey].slice(0, 2)) {
+        for (const img of data[clearArtKey]) {
             logos.push({ url: img.url, type: "logo" });
         }
     }
 
-    return { posters, backgrounds, logos };
+    // banners
+    const bannerKey = type === "show" ? "tvbanner" : "moviebanner";
+    const banners = [];
+    if (data[bannerKey]) {
+        for (const img of data[bannerKey]) {
+            banners.push({ url: img.url, likes: img.likes, lang: img.lang });
+        }
+    }
+
+    // discs
+    const discKey = "moviedisc";
+    const discs = [];
+    if (data[discKey]) {
+        for (const img of data[discKey]) {
+            discs.push({ url: img.url, likes: img.likes, disc: img.disc_number, discType: img.disc_type });
+        }
+    }
+
+    // thumbs
+    const thumbKey = type === "show" ? "tvthumb" : "moviethumb";
+    const thumbs = [];
+    if (data[thumbKey]) {
+        for (const img of data[thumbKey]) {
+            thumbs.push({ url: img.url, likes: img.likes, lang: img.lang });
+        }
+    }
+
+    return { posters, backgrounds, logos, banners, discs, thumbs };
 }
 
 export async function downloadBest({ tmdbId, type, targetDir }) {
