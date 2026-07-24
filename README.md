@@ -135,6 +135,8 @@ GPL v2 — see [LICENSE](LICENSE).
 ## Medias
 *Looks like regular Jellyfin* but is faster
 
-![vid](.github/media/screen-20260724-223252-1784925150692.mp4)
+*GITHUB TELL ME WHY CANT I EMBED VIDEOS!*
+[Watch Demo](.github/media/screen-20260724-223252-1784925150692.mp4)
+
 ![img](.github/media/Bildschirmfoto_20260724_223018.png)
 ![img](.github/media/Bildschirmfoto_20260724_223006.png)
