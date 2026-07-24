@@ -7,6 +7,12 @@ ground up in Node.js — no C#, no .NET, no legacy baggage.
 metadata enrichment, artwork, and streaming all operational. More features
 coming steadily. Contributions and feedback welcome.
 
+
+
+*There are also pictures and a video at the very bottom.*
+
+
+
 ## Why?
 
 Running your own media server is awesome. But existing solutions can be
@@ -125,3 +131,10 @@ API compatibility to leverage the existing ecosystem of clients.**
 ## License
 
 GPL v2 — see [LICENSE](LICENSE).
+
+## Medias
+*Looks like regular Jellyfin* but is faster
+
+![vid](.github/media/screen-20260724-223252-1784925150692.mp4)
+![img](.github/media/Bildschirmfoto_20260724_223018.png)
+![img](.github/media/Bildschirmfoto_20260724_223006.png)
