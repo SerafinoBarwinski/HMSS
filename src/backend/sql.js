@@ -45,24 +45,10 @@ export async function init(rootPsw, db, argon2) {
         db.prepare("UPDATE users SET uuid = ? WHERE id = ?").run(randomUUID(), row.id);
     }
 
-    const rootUser = db
-        .prepare("SELECT id FROM users WHERE name = ?")
-        .get("root");
+    // clear stale sessions on restart
+    db.exec("DELETE FROM sessions");
 
-    if (!rootUser) {
-        if (!rootPsw) return { succes: false, reason: "Root password missing", code: 6 };
-
-        const passwordHash = await argon2.hash(rootPsw, {
-            type: argon2.argon2id
-        });
-
-        db.prepare(`
-            INSERT INTO users (name, password_hash, perms, uuid)
-            VALUES (?, ?, ?, ?)
-        `).run("root", passwordHash, 3, randomUUID());
-
-        console.log("Root user created.");
-    }
+    // no root user auto-creation — first user is created via startup wizard
 
     const systemRow = db.prepare("SELECT id FROM system").get();
     if (!systemRow) {

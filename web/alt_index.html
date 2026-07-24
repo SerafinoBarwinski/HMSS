@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>HMSS</title>
 
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>HMSS</title>
     <script defer="defer" src="runtime.bundle.js?3cf5acc8506265662d4f"></script>
     <script defer="defer" src="node_modules.%40jellyfin.sdk.bundle.js?3cf5acc8506265662d4f"></script>
     <script defer="defer" src="node_modules.%40mui.material.bundle.js?3cf5acc8506265662d4f"></script>
@@ -36,79 +36,39 @@
     <script defer="defer" src="serviceworker.js?3cf5acc8506265662d4f"></script>
     <link href="46967.03edf3bb7ee048ee10be.css?3cf5acc8506265662d4f" rel="stylesheet">
     <link href="main.jellyfin.f725276386e5b19afe0c.css?3cf5acc8506265662d4f" rel="stylesheet">
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #0a0a0a; color: #ddd; font: 14px system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
-h1 { color: #00bcd4; margin-bottom: 20px; }
-.card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 20px; margin-bottom: 12px; width: 100%; }
-input, button { background: #111; border: 1px solid #333; color: #eee; padding: 10px 14px; border-radius: 6px; width: 100%; font-size: 14px; margin-bottom: 8px; }
-button { background: #00bcd4; color: #000; border: none; cursor: pointer; font-weight: 600; }
-button:hover { background: #0097a7; }
-.hidden { display: none; }
-.error { color: #f44336; font-size: 12px; margin-bottom: 8px; }
-.item { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid #222; cursor: pointer; }
-.item:hover { background: #1e1e1e; }
-.item .name { flex: 1; }
-.item .type { color: #666; font-size: 11px; }
-</style>
+    <link href="/web/hmss/themeoption.css" rel="stylesheet">
 </head>
+
 <body>
-<h1>HMSS</h1>
-
-<div id="login" class="card">
-    <input id="username" placeholder="Username" autocomplete="username">
-    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
-    <div id="login-error" class="error hidden"></div>
-    <button id="btn-login">Sign In</button>
-</div>
-
-<div id="dashboard" class="card hidden">
-    <p>Welcome, <b id="user-name"></b>!</p>
-    <div id="items"></div>
-</div>
-
-<script>
-const BASE = "";
-let token = null;
-
-document.getElementById("btn-login").addEventListener("click", async () => {
-    const name = document.getElementById("username").value;
-    const pass = document.getElementById("password").value;
-    const errEl = document.getElementById("login-error");
-    errEl.classList.add("hidden");
-
-    try {
-        const resp = await fetch(`${BASE}/Users/AuthenticateByName`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ Username: name, Pw: pass }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) { errEl.textContent = data.error || "Login failed"; errEl.classList.remove("hidden"); return; }
-
-        token = data.AccessToken;
-        document.getElementById("login").classList.add("hidden");
-        document.getElementById("dashboard").classList.remove("hidden");
-        document.getElementById("user-name").textContent = data.User.Name;
-
-        loadItems();
-    } catch (e) {
-        errEl.textContent = "Connection error";
-        errEl.classList.remove("hidden");
-    }
-});
-
-async function loadItems() {
-    const resp = await fetch(`${BASE}/Items?accessToken=${token}`);
-    const data = await resp.json();
-    const container = document.getElementById("items");
-    container.innerHTML = data.Items.map(i => `
-        <div class="item">
-            <span class="name">${i.Name}</span>
-            <span class="type">${i.Type}</span>
-        </div>
-    `).join("");
-}
-</script>
+    <div class="topbar">
+        <img class="topbar-logo" src="/web/hmss/img/logo.png">
+        <p>Home Media Streaming Service</p>
+        <small>By Serafino Barwinski</small>
+    </div>
+    <div class="center">
+        <h1>Welcome to HMSS</h1>
+        <strong id="InformTextWhichDesign">HMSS offers the option to use the Jellyfin design or the HMSS design. Which one
+            would you like to use?</strong><br>
+        <button id="useJDesign" class="JButton">Jellyfin´s Design</button><button id="useHMSSDesign"
+            class="HButton">HMSS Design</button>
+    </div>
+    <script>
+        var currDesign = localStorage.getItem("HMSSDesign")
+        if (currDesign == "J") {
+            window.location.replace("/web/index.html");
+        } else if (currDesign == "H") {
+            // HMSS frontend — coming soon
+        } else {
+            document.getElementById("useJDesign").addEventListener("click", () => {
+                localStorage.setItem("HMSSDesign", "J");
+                window.location.replace("/web/index.html");
+            });
+            document.getElementById("useHMSSDesign").addEventListener("click", () => {
+                localStorage.setItem("HMSSDesign", "H");
+                // HMSS frontend — coming soon
+            });
+        }
+    </script>
 </body>
+
 </html>

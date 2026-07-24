@@ -2,18 +2,80 @@ import { getAddons, getAddonsByCapability, searchAll } from "./addon_loader.js";
 import { authMiddleware, hmssAuthRoutes } from "./auth.js";
 import { getSystemInfo } from "./sql.js";
 import { suggestionsFromIndex } from "./jellyfin_items.js";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
+import crypto from "node:crypto";
 
-export async function hmssRoutes(app, getDb, apiVersion, port) {
+export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     app.use(authMiddleware(getDb));
     hmssAuthRoutes(app, getDb);
 
     app.get("/", (req, res) => {
-        const ua = req.headers["user-agent"] || "";
-        if (ua.includes("; wv)")) {
-            return res.redirect("/web/alt_index.html");
+        res.redirect("/web/alt_index.html");
+    });
+
+    app.post("/Startup/RemoteAccess", (req, res) => {
+        res.status(204).end();
+    });
+
+    app.post("/Startup/Complete", (req, res) => {
+        const db = getDb();
+        db.prepare("UPDATE system SET startup_wizard_completed = 1").run();
+        res.status(204).end();
+    });
+
+    app.get("/Localization/Options", async (req, res) => {
+        const data = await readFile(new URL("./localization.json", import.meta.url), "utf-8");
+        res.json(JSON.parse(data));
+    });
+
+    app.get("/Localization/Cultures", async (req, res) => {
+        const data = await readFile(new URL("./cultures.json", import.meta.url), "utf-8");
+        res.json(JSON.parse(data));
+    });
+
+    app.get("/Localization/Countries", async (req, res) => {
+        const data = await readFile(new URL("./countries.json", import.meta.url), "utf-8");
+        res.json(JSON.parse(data));
+    });
+
+    app.get("/Library/VirtualFolders", (req, res) => {
+        const typeMap = { movie: "movies", shows: "tvshows", music: "music", unsorted: "mixed" };
+        const result = [];
+        for (const [key, paths] of Object.entries(mediaDirs)) {
+            const ct = typeMap[key] || null;
+            for (const p of paths) {
+                result.push({
+                    Name: key.charAt(0).toUpperCase() + key.slice(1),
+                    Locations: [p],
+                    CollectionType: ct,
+                    LibraryOptions: {
+                        Enabled: true,
+                        SaveLocalMetadata: false,
+                        PreferredMetadataLanguage: "en",
+                        MetadataCountryCode: "US",
+                        AllowEmbeddedSubtitles: "AllowAll",
+                        PathInfos: [{ Path: p }],
+                    },
+                    ItemId: crypto.randomUUID(),
+                    PrimaryImageItemId: null,
+                    RefreshProgress: 0,
+                    RefreshStatus: "Idle",
+                });
+            }
         }
-        res.redirect("/web/index.html");
+        res.json(result);
+    });
+
+    app.get("/Environment/Drives", (req, res) => {
+        // const drives = [];
+        // for (const paths of Object.values(mediaDirs)) {
+        //     for (const p of paths) {
+        //         drives.push({ Name: p, Path: p, Type: "File" });
+        //     }
+        // }
+        // if (drives.length === 0) drives.push({ Name: "/", Path: "/", Type: "File" });
+        res.json([{ Name: "Adding custom libraries is not yet supported", Path: "/", Type: "File" }]);
     });
 
     app.get("/Branding/Configuration", (req, res) => {
@@ -44,15 +106,34 @@ export async function hmssRoutes(app, getDb, apiVersion, port) {
         if (sys && sys.startup_wizard_completed) {
             return res.status(204).end();
         }
-        res.status(204).end();
+        // wizard not complete — check if first user exists
+        const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
+        if (userCount > 0) return res.status(204).end();
+        // no users — let wizard create first user
+        res.status(200).json({});
     });
 
-    app.post("/Startup/User", (req, res) => {
+    app.post("/Startup/User", async (req, res) => {
         const db = getDb();
-        const { Name, Password } = req.body;
+        const sys = getSystemInfo(db);
+        if (sys && sys.startup_wizard_completed) {
+            return res.status(400).json({ error: "Setup already completed." });
+        }
+
+        const { Name, Password } = req.body || {};
         if (!Name || !Password) return res.status(400).json({ error: "Name and Password required." });
 
-        db.prepare("UPDATE system SET startup_wizard_completed = 1").run();
+        const existingUser = db.prepare("SELECT id FROM users WHERE name = ?").get(Name);
+        if (existingUser) return res.status(400).json({ error: "User already exists." });
+
+        const argon2 = (await import("argon2")).default;
+        const passwordHash = await argon2.hash(Password, { type: argon2.argon2id });
+        const uuid = crypto.randomUUID();
+
+        db.prepare("INSERT INTO users (name, password_hash, perms, uuid) VALUES (?, ?, ?, ?)")
+            .run(Name, passwordHash, 3, uuid);
+
+        console.log(`First user '${Name}' created via startup wizard.`);
         res.status(204).end();
     });
 
@@ -62,6 +143,15 @@ export async function hmssRoutes(app, getDb, apiVersion, port) {
             MetadataCountryCode: "US",
             PreferredMetadataLanguage: "en",
         });
+    });
+
+    app.post("/Startup/Configuration", (req, res) => {
+        const db = getDb();
+        const { ServerName } = req.body || {};
+        if (ServerName) {
+            db.prepare("UPDATE system SET server_name = ?").run(ServerName);
+        }
+        res.status(204).end();
     });
 
     app.post("/System/Restart", (req, res) => {
@@ -221,6 +311,62 @@ export async function hmssRoutes(app, getDb, apiVersion, port) {
             SortOrder: "Ascending",
             CustomPrefs: {},
         });
+    });
+
+    app.get("/Items/Counts", (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        res.json({
+            MovieCount: index.movies?.length || 0,
+            SeriesCount: [...new Set(index.shows?.map(s => s.showName) || [])].length,
+            EpisodeCount: index.shows?.length || 0,
+            SongCount: index.music?.length || 0,
+            ArtistCount: [...new Set(index.music?.map(m => m.artist) || [])].length,
+            AlbumCount: [...new Set(index.music?.map(m => m.album) || [])].length,
+            ProgramCount: 0,
+            TrailerCount: 0,
+            MusicVideoCount: 0,
+            BoxSetCount: 0,
+            BookCount: 0,
+            ItemCount: (index.shows?.length || 0) + (index.movies?.length || 0) + (index.music?.length || 0),
+        });
+    });
+
+    app.get("/Sessions", (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const sessions = db.prepare(`
+            SELECT sessions.token, sessions.created_at, users.id, users.uuid, users.name
+            FROM sessions JOIN users ON users.id = sessions.user_id
+            ORDER BY sessions.created_at DESC
+        `).all();
+
+        const sys = getSystemInfo(db);
+        const serverId = sys?.id || "hmss-local";
+
+        res.json(sessions.map(s => ({
+            Id: s.token,
+            UserId: s.uuid || String(s.id),
+            UserName: s.name,
+            Client: "HMSS",
+            DeviceName: "Web Browser",
+            DeviceId: "web",
+            ApplicationVersion: apiVersion,
+            LastActivityDate: new Date().toISOString(),
+            LastPlaybackCheckIn: "0001-01-01T00:00:00.0000000Z",
+            IsActive: true,
+            SupportsMediaControl: false,
+            SupportsRemoteControl: false,
+            NowPlayingQueue: [],
+            NowPlayingQueueFullItems: [],
+            HasCustomDeviceName: false,
+            PlayableMediaTypes: ["Audio", "Video"],
+            ServerId: serverId,
+            PlayState: { CanSeek: false, IsPaused: false, IsMuted: false, RepeatMode: "RepeatNone", PlaybackOrder: "Default" },
+            AdditionalUsers: [],
+            Capabilities: { PlayableMediaTypes: ["Audio", "Video"], SupportedCommands: [], SupportsMediaControl: true, SupportsPersistentIdentifier: false },
+            SupportedCommands: [],
+        })));
     });
 
     app.get("/Items/Suggestions", (req, res) => {
@@ -583,9 +729,8 @@ export async function jellyfinRoutes(app) {
     app.get('/Search/Hints', (req, res) => { /* GetSearchHints */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Session ===
-    app.get('/Sessions', (req, res) => { /* GetSessions */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Sessions/Capabilities', (req, res) => { /* PostCapabilities */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Sessions/Capabilities/Full', (req, res) => { /* PostFullCapabilities */ res.status(200).json({ message: 'Not implemented' }); });
+    app.post('/Sessions/Capabilities/Full', (req, res) => { /* PostFullCapabilities */ res.status(204) });
     app.post('/Sessions/Playing', (req, res) => { /* ReportPlaybackStart */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Sessions/Playing/Ping', (req, res) => { /* PingPlaybackSession */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Sessions/Playing/Progress', (req, res) => { /* ReportPlaybackProgress */ res.status(200).json({ message: 'Not implemented' }); });
@@ -670,8 +815,6 @@ export async function jellyfinRoutes(app) {
     app.get('/System/Configuration/:key', (req, res) => { /* GetNamedConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/System/Configuration/:key', (req, res) => { /* UpdateNamedConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/System/Endpoint', (req, res) => { /* GetEndpointInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Info', (req, res) => { /* GetSystemInfo */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/System/Info/Public', (req, res) => { /* GetPublicSystemInfo */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/System/Info/Storage', (req, res) => { /* GetSystemStorage */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/System/Logs', (req, res) => { /* GetServerLogs */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/System/Logs/Log', (req, res) => { /* GetLogFile */ res.status(200).json({ message: 'Not implemented' }); });

@@ -17,6 +17,11 @@ export function spamProtection({ windowMs = 60000, maxRequests = 100 } = {}) {
             return next();
         }
 
+        // skip static assets — they shouldn't count toward rate limits
+        if (req.path.startsWith("/web/") || /\.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?|ttf|map|mp3|json)(\?.*)?$/.test(req.path)) {
+            return next();
+        }
+
         const now = Date.now();
         const cutoff = now - windowMs;
 
