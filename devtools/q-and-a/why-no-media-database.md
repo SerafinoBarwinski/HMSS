@@ -1,0 +1,7 @@
+Reading media files directly from the filesystem is often a better approach than storing media information in a database. The filesystem is the single source of truth, so there is no risk of the database becoming outdated or inconsistent with the actual files. It also reduces complexity, avoids database synchronization issues, and makes it easier to add, remove, or move media without requiring additional updates.
+
+Additionally, because metadata is stored alongside your media files, there is no need to regenerate it after migrating your system or reinstalling the server. This can save a significant amount of time, especially for large media libraries, since posters, artwork, and other metadata are already available and do not need to be downloaded or recreated.
+
+The main downside of this approach is that it uses more disk space because metadata, artwork, and other assets are stored alongside the media files. It may also introduce slightly higher latency when browsing or scanning libraries, as the application has to read information directly from the filesystem instead of retrieving it from a pre-indexed database. However, for most home media servers, this performance impact is minimal and is often outweighed by the benefits of simplicity and portability.
+
+If multiple users request a media database or suggest it as a feature, I will add an optional database-based mode. This would allow users to choose between direct filesystem scanning and a database-driven approach depending on their specific needs and setup.

@@ -7,7 +7,7 @@ Can also be faster since Express is well optimized.
 **Status: Alpha.** Core functionality works — authentication, media browsing,
 metadata enrichment, artwork, and streaming all operational. More features
 coming steadily. Contributions and feedback welcome.
-*There are also pictures and a video at the very bottom.*
+[*There are also pictures and a video at the very bottom.*]: #
 
 ## Why?
 
@@ -17,7 +17,7 @@ slow to fix issues that matter to self-hosters.
 
 HMSS takes a different approach: a fresh codebase in Node.js, designed to be
 easy to read, easy to modify, and easy to run. It speaks the Jellyfin API so
-your favourite clients (Findroid, Jellyfin Mobile, etc) just work — but
+your favourite clients (Jellyfin Mobile, Findroid, etc) just work — but
 the server itself is diffrent from top to bottom.
 
 ## Requirements
@@ -47,7 +47,7 @@ npm start
 ```
 
 The server starts on port 8000. Open `http://localhost:8000` in a browser or
-connect with Findroid / Jellyfin Mobile.
+connect with  Jellyfin Mobile / Findroid.
 
 On first start, the Setup Wizard guides you through creating the admin account
 and configuring server settings.
@@ -109,7 +109,7 @@ An XML file from an SDDP would also be helpful!
 ## API Compatibility
 
 HMSS implements a large subset of the Jellyfin API. Most endpoints used by
-Jellyfin Mobile, and other clients are functional.
+Jellyfin Mobile, and other clients are functional. Not Every API works 100% especially so early.
 
 
 **HMSS is not affiliated with or endorsed by the Jellyfin project. We implement
@@ -122,8 +122,4 @@ GPL v2 — see [LICENSE](LICENSE).
 ## Medias
 *Looks like regular Jellyfin* but is faster
 
-*GITHUB TELL ME WHY CANT I EMBED VIDEOS!*
-[Watch Demo](.github/media/screen-20260724-223252-1784925150692.mp4)
-
-![img](.github/media/Bildschirmfoto_20260724_223018.png)
-![img](.github/media/Bildschirmfoto_20260724_223006.png)
+I removed them because i changed a lost since these Screenshots were taken.
