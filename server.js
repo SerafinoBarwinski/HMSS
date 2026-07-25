@@ -15,9 +15,9 @@ import * as meta from "./src/backend/media_meta.js"
 import * as addonLoader from "./src/backend/addon_loader.js"
 import { buildIndex } from "./src/backend/media_indexer.js"
 import { organizeShows, organizeMovies, organizeMusic } from "./src/backend/media_organizer.js"
-import { startDiscovery } from "./src/backend/discovery.js"
 import { spamProtection } from "./src/backend/spam_protection.js"
 import { telerisingRoutes, startTelerisingIfAutostart } from "./src/backend/telerising.js"
+import { startDiscovery } from "./src/backend/discovery.js"
 import { WebSocketServer } from "ws";
 
 enableConsoleFileLogger("./logs/server.log")
@@ -319,3 +319,4 @@ globalThis.__wsSendToAll = sendToAllClients;
 globalThis.__wsSendToUser = sendToUser;
 
 startDiscovery(7359, port);
+
