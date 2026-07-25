@@ -2,6 +2,7 @@
 
 A Jellyfin-compatible media streaming server you can host yourself. Built from the
 ground up in Node.js — no C#, no .NET, no legacy baggage.
+Can also be faster since Express is well optimized.
 
 **Status: Alpha.** Core functionality works — authentication, media browsing,
 metadata enrichment, artwork, and streaming all operational. More features
@@ -116,6 +117,8 @@ and posters from TMDB and Fanart.tv.
 
 ## What's Next
 
+- Adding remaning APIs
+- Adding remaning API features
 - HMSS-native frontend
 - XMLTV / EPG guide data
 

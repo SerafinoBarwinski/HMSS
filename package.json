@@ -7,7 +7,8 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "server": "pm2 start server.js --name HMSS"
+    "server": "node server.js",
+    "checkrun":"ps aux | grep -E 'node|telerising'"
   },
   "dependencies": {
     "argon2": "^0.45.0",

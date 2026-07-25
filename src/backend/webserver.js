@@ -17,6 +17,15 @@ let _liveTvCache = { channels: [], ts: 0 };
 function findLiveTvChannel(itemId) {
     return _liveTvCache.channels.find(c => c.Id === itemId) || null;
 }
+function resolveParentId(pid) {
+    if (!pid) return null;
+    if (pid === "movies" || pid === generateItemId("movies")) return "movies";
+    if (pid === "tvshows" || pid === "shows" || pid === generateItemId("tvshows")) return "tvshows";
+    if (pid === "music" || pid === generateItemId("music")) return "music";
+    if (pid === "unsorted" || pid === generateItemId("unsorted")) return "unsorted";
+    if (pid === "livetv" || pid === generateItemId("livetv")) return "livetv";
+    return pid;
+}
 
 export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     app.use(authMiddleware(getDb));
@@ -959,16 +968,21 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     });
 
     app.get("/UserViews", (req, res) => {
-        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
+        const LIB_IDS = {
+            movies: generateItemId("movies"),
+            tvshows: generateItemId("tvshows"),
+            music: generateItemId("music"),
+            livetv: generateItemId("livetv"),
+        };
         const items = [
-            { Name: "Movies", CollectionType: "movies", Id: "movies", IsFolder: true, Type: "CollectionFolder" },
-            { Name: "Shows", CollectionType: "tvshows", Id: "shows", IsFolder: true, Type: "CollectionFolder" },
-            { Name: "Music", CollectionType: "music", Id: "music", IsFolder: true, Type: "CollectionFolder" },
+            { Name: "Movies", CollectionType: "movies", Id: LIB_IDS.movies, IsFolder: true, Type: "CollectionFolder" },
+            { Name: "Shows", CollectionType: "tvshows", Id: LIB_IDS.tvshows, IsFolder: true, Type: "CollectionFolder" },
+            { Name: "Music", CollectionType: "music", Id: LIB_IDS.music, IsFolder: true, Type: "CollectionFolder" },
         ];
         const db = getDb();
         const ltConfig = (() => { try { return JSON.parse((getSystemInfo(db)?.config_json || "{}")).livetv; } catch { return null; } })();
         if (ltConfig?.TunerHosts?.length > 0) {
-            items.push({ Name: "Live TV", CollectionType: "livetv", Id: "livetv", IsFolder: true, Type: "CollectionFolder" });
+            items.push({ Name: "Live TV", CollectionType: "livetv", Id: LIB_IDS.livetv, IsFolder: true, Type: "CollectionFolder" });
         }
         res.json({ Items: items, TotalRecordCount: items.length });
     });
@@ -1049,7 +1063,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     });
 
     app.get("/Items", async (req, res) => {
-        const parentId = req.query.parentId || req.query.ParentId;
+        const rawParentId = req.query.parentId || req.query.ParentId;
+        const parentId = resolveParentId(rawParentId);
         if (parentId === "livetv") {
             const db = getDb();
             const allChannels = await getLiveTvChannels(db);
@@ -1074,7 +1089,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     });
 
     app.get("/Users/:userId/Items", async (req, res) => {
-        const parentId = req.query.parentId || req.query.ParentId;
+        const rawParentId = req.query.parentId || req.query.ParentId;
+        const parentId = resolveParentId(rawParentId);
         if (parentId === "livetv") {
             const db = getDb();
             const allChannels = await getLiveTvChannels(db);
@@ -1650,7 +1666,9 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     app.get('/Movies/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.get('/Shows/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.get('/Trailers/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
-    app.get('/UserItems/Resume', (req, res) => { /* GetResumeItems */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/UserItems/Resume', (req, res) => {
+        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    });
 
     // === LibraryStructure ===
     app.delete('/Library/VirtualFolders', (req, res) => { /* RemoveVirtualFolder */ res.status(200).json({ message: 'Not implemented' }); });
@@ -2293,7 +2311,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     app.post('/Sessions/:sessionId/Viewing', (req, res) => { /* DisplayContent */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Show ===
-    app.get('/Shows/NextUp', (req, res) => { /* GetNextUp */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Shows/NextUp', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.get('/Shows/Upcoming', (req, res) => { /* GetUpcomingEpisodes */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Shows/:seriesId/Episodes', (req, res) => {
         if (!req.user) return res.status(401).end();
