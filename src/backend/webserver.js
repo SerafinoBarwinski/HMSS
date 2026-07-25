@@ -1181,6 +1181,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const id = generateItemId(found.id || found.filePath);
         if (itemType === "Season") {
             const seasonId = generateItemId(`${found.showName}-s${found.season}`);
+            const seasonPoster = findPosterPath(found.filePath);
             return res.json({
                 Name: found.season === 0 ? "Specials" : `Season ${found.season}`,
                 ServerId: serverId,
@@ -1192,9 +1193,9 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 IsFolder: true,
                 Type: "Season",
                 UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: seasonId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"), ItemId: seasonId },
-                ImageTags: {},
+                ImageTags: seasonPoster ? { Primary: seasonPoster.tag } : {},
                 BackdropImageTags: [],
-                ImageBlurHashes: {},
+                ImageBlurHashes: seasonPoster ? { Primary: {} } : {},
                 LocationType: "FileSystem",
             });
         }
@@ -2294,7 +2295,86 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     // === Show ===
     app.get('/Shows/NextUp', (req, res) => { /* GetNextUp */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Shows/Upcoming', (req, res) => { /* GetUpcomingEpisodes */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Shows/:seriesId/Episodes', (req, res) => { /* GetEpisodes */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Shows/:seriesId/Episodes', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const sys = getSystemInfo(getDb());
+        const serverId = sys?.id || "hmss-local";
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const seriesId = req.params.seriesId.replace(/-/g, "");
+        const seasonId = (req.query.seasonId || req.query.SeasonId || "").replace(/-/g, "");
+        const limit = parseInt(req.query.Limit) || 500;
+        const start = parseInt(req.query.StartIndex) || 0;
+
+        let showName = null;
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.showName) === seriesId) { showName = ep.showName; break; }
+        }
+        if (!showName) return res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+
+        let episodes = (index.shows || []).filter(ep => ep.showName === showName);
+        if (seasonId) {
+            episodes = episodes.filter(ep => generateItemId(`${ep.showName}-s${ep.season}`) === seasonId);
+        }
+
+        const items = episodes.map(ep => {
+            const itemId = generateItemId(ep.id || ep.filePath);
+            const poster = findPosterPath(ep.filePath);
+            const runTimeTicks = ep.duration ? Math.round(ep.duration * 10000000) : 0;
+            return {
+                Name: ep.title || `S${String(ep.season).padStart(2,"0")}E${String(ep.episode).padStart(2,"0")}`,
+                OriginalTitle: ep.title || "",
+                ServerId: serverId,
+                Id: itemId,
+                DateCreated: new Date().toISOString(),
+                CanDelete: false,
+                CanDownload: false,
+                HasLyrics: false,
+                HasSubtitles: false,
+                SortName: (ep.title || `s${ep.season}e${ep.episode}`).toLowerCase(),
+                PremiereDate: undefined,
+                ExternalUrls: [],
+                MediaSources: [],
+                Path: ep.filePath || "",
+                Overview: ep.overview || "",
+                Taglines: [],
+                Genres: ep.genres || [],
+                CommunityRating: null,
+                RunTimeTicks: runTimeTicks,
+                PlayAccess: "Full",
+                ProductionYear: ep.year || undefined,
+                IsFolder: false,
+                Type: "Episode",
+                ParentId: generateItemId(showName),
+                SeriesName: showName,
+                SeriesId: generateItemId(showName),
+                SeasonId: seasonId || generateItemId(`${showName}-s${ep.season}`),
+                IndexNumber: ep.episode,
+                ParentIndexNumber: ep.season,
+                Number: String(ep.episode || ""),
+                VideoType: "VideoFile",
+                UserData: {
+                    PlaybackPositionTicks: 0,
+                    PlayCount: 0,
+                    IsFavorite: false,
+                    Played: false,
+                    Key: itemId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"),
+                    ItemId: itemId,
+                },
+                ImageTags: poster ? { Primary: poster.tag } : {},
+                BackdropImageTags: [],
+                ImageBlurHashes: poster ? { Primary: {} } : {},
+                LocationType: "FileSystem",
+                MediaType: "Video",
+                PrimaryImageAspectRatio: 0,
+            };
+        });
+
+        res.json({
+            Items: items.slice(start, start + limit),
+            TotalRecordCount: items.length,
+            StartIndex: start,
+        });
+    });
     app.get('/Shows/:seriesId/Seasons', (req, res) => { /* GetSeasons */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Startup ===
