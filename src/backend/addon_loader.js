@@ -69,6 +69,7 @@ export async function loadAddons(userConfig = {}) {
             version: manifest.version || "0.0.0",
             description: manifest.description || "",
             capabilities: manifest.capabilities || [],
+            mediaTypes: manifest.mediaTypes || [],
             dependency: manifest.dependency || [],
             module,
             config,
@@ -116,6 +117,14 @@ export function getAddonsByCapability(capability) {
     return addons.filter(a => a.capabilities.includes(capability));
 }
 
+export function getAddonsByCapabilityAndType(capability, mediaType) {
+    return addons.filter(a => {
+        if (!a.capabilities.includes(capability)) return false;
+        if (a.mediaTypes.length > 0 && !a.mediaTypes.includes(mediaType)) return false;
+        return true;
+    });
+}
+
 export async function getMetadata(input) {
     const providers = getAddonsByCapability("metadata");
     for (const provider of providers) {
@@ -141,4 +150,27 @@ export async function searchAll(query) {
         }
     }
     return results;
+}
+
+export function isAnime(showName) {
+    if (!showName) return false;
+    const animeProviders = getAddonsByCapability("anime-artwork");
+    for (const provider of animeProviders) {
+        try {
+            if (provider.module.findSeries) {
+                const matches = provider.module.findSeries(showName);
+                if (matches.length > 0 && matches[0].score >= 0.5) return true;
+            }
+        } catch {}
+    }
+    return false;
+}
+
+export function countFields(obj) {
+    if (!obj) return 0;
+    let n = 0;
+    for (const [, v] of Object.entries(obj)) {
+        if (v !== null && v !== undefined && v !== "" && !(Array.isArray(v) && v.length === 0)) n++;
+    }
+    return n;
 }

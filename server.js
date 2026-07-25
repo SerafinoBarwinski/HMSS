@@ -3,7 +3,6 @@ import { exit } from "node:process"
 import argon2 from "argon2"
 import figlet from "figlet"
 import express from "express"
-import { expectFailure } from "node:test"
 import { fileTypeFromFile } from "file-type"
 import crypto from "node:crypto";
 
@@ -19,6 +18,7 @@ import { organizeShows, organizeMovies, organizeMusic } from "./src/backend/medi
 import { startDiscovery } from "./src/backend/discovery.js"
 import { spamProtection } from "./src/backend/spam_protection.js"
 import { telerisingRoutes, startTelerisingIfAutostart } from "./src/backend/telerising.js"
+import { WebSocketServer } from "ws";
 
 enableConsoleFileLogger("./logs/server.log")
 console.log("=".repeat(50))
@@ -33,11 +33,13 @@ var mediaDirs = {
     shows: ["./media/shows"],
     unsorted: ["./media/unsorted"],
 }
-var ffmpeg_bin = "/bin/ffmpeg"
+var ffmpeg_bin = "/bin/ffmpeg" //Fallback FFMPEG Path Arg
 var JPI_Version = "10.11.11" //Jellyfin API Version
 
 
-const DEBUG_LOG_EVERY_REQUEST = true
+// Todo: Add Args instead of Vars!
+const DEBUG_LOG_EVERY_REQUEST = false
+const DEBUG_LOG_EVERY_WEBSCKT = false;
 const DEBUG_fail_integrity_check = false;
 
 // -----
@@ -57,7 +59,7 @@ if (!integrityCheck.success) {
     exit(1)
 }
 console.log("Integrity check passed.");
-console.log(figlet.textSync("HMSS", {
+console.log(figlet.textSync("\nHMSS", {
     font: "RubiFont",
     horizontalLayout: "default",
     verticalLayout: "default",
@@ -69,7 +71,7 @@ console.log(figlet.textSync("HMSS", {
 const addonConfig = {};
 const addons = await addonLoader.loadAddons(addonConfig);
 
-async function StartMediaIndex() {
+export async function StartMediaIndex() {
     console.log("The indexer has started. This may take a while...")
     const index = await buildIndex(mediaDirs);
     console.log(`Indexed: ${index.shows.length} show episodes, ${index.movies.length} movies, ${index.music.length} tracks, ${index.unsorted.length} unsorted`);
@@ -90,6 +92,7 @@ async function StartMediaIndex() {
 const app = express()
 app.disable("x-powered-by");
 app.use(express.json());
+app.set('trust proxy', true);
 app.use(spamProtection({ windowMs: 60000, maxRequests: 100 }));
 app.use((req, res, next) => {
     res.set("Server", "Kestrel");
@@ -109,6 +112,7 @@ if (DEBUG_LOG_EVERY_REQUEST) {
         if (!req.originalUrl.includes("/web")) {
             res.on("finish", () => {
                 console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - start}ms)`);
+                // to debug for specific clients:
                 if (req.originalUrl === "/" || req.originalUrl === "/web/index.html") {
                     console.log("  User-Agent:", req.headers["user-agent"]?.substring(0, 80));
                     console.log("  Accept:", req.headers["accept"]?.substring(0, 80));
@@ -123,15 +127,10 @@ const getDb = () => db;
 globalThis.__db = db;
 
 await webserver.hmssRoutes(app, getDb, JPI_Version, port, mediaDirs)
-
-// Host jellyfin-web for Jellyfin Mobile
-app.use("/web", express.static("web"));
-
-await webserver.jellyfinRoutes(app, getDb, JPI_Version)
+await webserver.jellyfinRoutes(app, getDb, JPI_Version, mediaDirs, port)
 await webserver.addonRoutes(app)
 telerisingRoutes(app, getDb, port)
-
-import { WebSocketServer } from "ws";
+app.use("/web", express.static("web"));
 
 const server = app.listen(port, "0.0.0.0", async () => {
     console.log(`HMSS listening on port ${port}`);
@@ -148,102 +147,175 @@ const server = app.listen(port, "0.0.0.0", async () => {
 
 const wss = new WebSocketServer({ server, path: "/socket" });
 
+const wsClients = new Set();
+
+function sendToAllClients(messageType, data = null) {
+    const msg = { messageType, messageId: crypto.randomUUID() };
+    if (data !== null) msg.data = data;
+    const payload = JSON.stringify(msg);
+    wsClients.forEach(client => {
+        if (client.readyState === 1) client.send(payload);
+    });
+}
+
+function sendToUser(userId, messageType, data = null) {
+    const msg = { messageType, messageId: crypto.randomUUID() };
+    if (data !== null) msg.data = data;
+    const payload = JSON.stringify(msg);
+    wsClients.forEach(client => {
+        if (client.readyState === 1 && client._userId === userId) client.send(payload);
+    });
+}
+
 wss.on("connection", (ws, req) => {
-    // Extract token from URL query or header
     const url = new URL(req.url, `http://${req.headers.host}`);
     const token = url.searchParams.get("api_key") || url.searchParams.get("accessToken");
     const authHeader = req.headers["authorization"] || "";
     const tokenMatch = authHeader.match(/Token="([^"]+)"/);
     const finalToken = tokenMatch ? tokenMatch[1] : token;
 
+    let user = null;
     if (finalToken) {
-        const user = sql.validateToken(finalToken, db);
+        user = sql.validateToken(finalToken, db);
         if (!user) {
-            ws.send(JSON.stringify({ MessageType: "ForceKeepAlive", Data: 0 }));
+            ws.send(JSON.stringify({ messageType: "ForceKeepAlive", messageId: crypto.randomUUID(), data: 0 }));
             ws.close();
             return;
         }
+        ws._userId = user.id;
+        ws._token = finalToken;
+        wsClients.add(ws);
+    } else {
+        ws.send(JSON.stringify({ messageType: "ForceKeepAlive", messageId: crypto.randomUUID(), data: 0 }));
+        ws.close();
+        return;
     }
 
-    let periodicInterval = null;
+    const intervals = new Set();
+    let heartbeatInterval = null;
+
+    ws.send(JSON.stringify({
+        messageType: "Sessions",
+        data: [{
+            id: crypto.randomUUID(),
+            userId: user.id,
+            userName: user.username,
+            deviceId: "hmss-server",
+            deviceName: "HMSS",
+            isActive: true,
+            playState: { positionTicks: 0, isPaused: false }
+        }],
+        messageId: crypto.randomUUID()
+    }));
 
     ws.on("message", (data) => {
         try {
             const msg = JSON.parse(data.toString());
+            if (DEBUG_LOG_EVERY_WEBSCKT) console.log("[WS-FR]:", msg.messageType);
 
-            switch (msg.MessageType) {
+            switch (msg.messageType) {
                 case "KeepAlive":
                     ws.send(JSON.stringify({
-                        MessageType: "KeepAlive",
-                        MessageId: crypto.randomUUID(),
+                        messageType: "ForceKeepAlive",
+                        messageId: crypto.randomUUID(),
+                        data: 30
                     }));
                     break;
 
                 case "SessionsStart":
                     parsePeriodic(msg, period => {
-                        periodicInterval = setInterval(() => {
+                        const id = setInterval(() => {
+                            if (ws.readyState !== 1) return;
                             ws.send(JSON.stringify({
-                                MessageType: "Sessions",
-                                Data: [],
-                                MessageId: crypto.randomUUID(),
+                                messageType: "Sessions",
+                                data: [{
+                                    id: crypto.randomUUID(),
+                                    userId: user.id,
+                                    userName: user.username,
+                                    deviceId: "hmss-server",
+                                    deviceName: "HMSS",
+                                    isActive: true,
+                                    playState: { positionTicks: 0, isPaused: false }
+                                }],
+                                messageId: crypto.randomUUID()
                             }));
                         }, period);
+                        intervals.add(id);
                     });
                     break;
 
                 case "SessionsStop":
-                case "ActivityLogEntryStop":
-                case "ScheduledTasksInfoStop":
-                    if (periodicInterval) clearInterval(periodicInterval);
-                    periodicInterval = null;
+                    intervals.forEach(id => clearInterval(id));
+                    intervals.clear();
                     break;
 
                 case "ScheduledTasksInfoStart":
                     parsePeriodic(msg, period => {
-                        periodicInterval = setInterval(() => {
+                        const id = setInterval(() => {
+                            if (ws.readyState !== 1) return;
                             ws.send(JSON.stringify({
-                                MessageType: "ScheduledTasksInfo",
-                                Data: [],
-                                MessageId: crypto.randomUUID(),
+                                messageType: "ScheduledTasksInfo",
+                                data: [],
+                                messageId: crypto.randomUUID()
                             }));
                         }, period);
+                        intervals.add(id);
                     });
+                    break;
+
+                case "ScheduledTasksInfoStop":
+                    intervals.forEach(id => clearInterval(id));
+                    intervals.clear();
                     break;
 
                 case "ActivityLogEntryStart":
                     parsePeriodic(msg, period => {
-                        periodicInterval = setInterval(() => {
+                        const id = setInterval(() => {
+                            if (ws.readyState !== 1) return;
                             ws.send(JSON.stringify({
-                                MessageType: "ActivityLogEntry",
-                                Data: [],
-                                MessageId: crypto.randomUUID(),
+                                messageType: "ActivityLogEntry",
+                                data: [],
+                                messageId: crypto.randomUUID()
                             }));
                         }, period);
+                        intervals.add(id);
                     });
                     break;
 
+                case "ActivityLogEntryStop":
+                    intervals.forEach(id => clearInterval(id));
+                    intervals.clear();
+                    break;
+
                 default:
-                    // unknown message type, ignore
                     break;
             }
         } catch { }
     });
 
     ws.on("close", () => {
-        if (periodicInterval) clearInterval(periodicInterval);
+        wsClients.delete(ws);
+        intervals.forEach(id => clearInterval(id));
+        intervals.clear();
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
     });
 
-    ws.on("error", () => { });
+    ws.on("error", () => {
+        wsClients.delete(ws);
+    });
 });
 
 function parsePeriodic(msg, callback) {
-    if (typeof msg.Data === "string") {
-        const parts = msg.Data.split(",");
+    if (typeof msg.data === "string") {
+        const parts = msg.data.split(",");
         const interval = parseInt(parts[1]) || 5000;
         if (interval > 0) callback(Math.min(interval, 60000));
-    } else if (typeof msg.Data === "number" && msg.Data > 0) {
-        callback(Math.min(msg.Data, 60000));
+    } else if (typeof msg.data === "number" && msg.data > 0) {
+        callback(Math.min(msg.data, 60000));
     }
 }
+
+globalThis.__wsSendToAll = sendToAllClients;
+globalThis.__wsSendToUser = sendToUser;
 
 startDiscovery(7359, port);

@@ -18,7 +18,8 @@ export async function init(rootPsw, db, argon2) {
             "max_video_width" INT not null default 1920,
             "max_video_height" INT not null default 1080,
             "max_video_bitrate" INT not null default 20000000,
-            "allow_hdr" BOOLEAN not null default true
+            "allow_hdr" BOOLEAN not null default true,
+            "policy_json" TEXT null
         );
 
         create table if not exists "sessions" (
@@ -47,6 +48,7 @@ export async function init(rootPsw, db, argon2) {
     }
 
     try { db.exec("ALTER TABLE system ADD COLUMN telerising_autostart BOOLEAN default false"); } catch {}
+    try { db.exec("ALTER TABLE users ADD COLUMN policy_json TEXT"); } catch {}
 
     // clear stale sessions on restart
     db.exec("DELETE FROM sessions");

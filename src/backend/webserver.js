@@ -1,17 +1,23 @@
 import { getAddons, getAddonsByCapability, searchAll } from "./addon_loader.js";
 import { authMiddleware, hmssAuthRoutes } from "./auth.js";
 import { getSystemInfo } from "./sql.js";
-import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, readMetaForDir } from "./jellyfin_items.js";
+import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { getItemMeta } from "./meta_reader.js";
 import { readFile, writeFile } from "node:fs/promises";
-import { killTelerisingProcess } from "./telerising.js";
+import * as telerising from "./telerising.js";
 import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { imageSize } from "image-size";
+import { fileURLToPath } from "node:url";
+import * as server from "../../server.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let _liveTvCache = { channels: [], ts: 0 };
 function findLiveTvChannel(itemId) {
@@ -32,15 +38,45 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     hmssAuthRoutes(app, getDb);
 
     app.use((req, res, next) => {
-        if (req.path.startsWith("/System")) {
+        const NO_CACHE_ROUTES = [
+            "/Socket",
+            "/websocket",
+            "/Sessions",
+            "/Items",
+            "/Videos",
+            "/Audio",
+            "/LiveTv",
+            "/Users/Authenticate",
+            "/QuickConnect",
+            "/Notifications"
+        ];
+
+        if (NO_CACHE_ROUTES.some(route => req.path.startsWith(route))) {
             res.set("Cache-Control", "no-store, no-cache, must-revalidate");
             res.set("Pragma", "no-cache");
+            res.set("Expires", "0");
         }
         next();
     });
 
     app.get("/", (req, res) => {
         res.redirect("/web/alt_index.html");
+    });
+
+    app.get(/^\/web\/banner-light.*\.png$/, (req, res) => {
+        res.sendFile(path.join(__dirname, "../../web/hmss/img/logo.png"));
+    });
+
+    app.get(/^\/web\/favicon.*\.ico$/, (req, res) => {
+        res.sendFile(path.join(__dirname, "../../web/hmss/img/logo.png"));
+    });
+
+    app.get(/^\/web\/favicons\/touchicon.*\.png$/, (req, res) => {
+        res.sendFile(path.join(__dirname, "../../web/hmss/img/logo.png"));
+    });
+
+    app.get(/^\/web\/icon-transparent.*\.png$/, (req, res) => {
+        res.sendFile(path.join(__dirname, "../../web/hmss/img/logo.png"));
     });
 
     app.post("/Startup/RemoteAccess", (req, res) => {
@@ -116,7 +152,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                         }
                     }
                 }
-            } catch {}
+            } catch { }
         }
 
         const filtered = images.filter(i => i.Type === imageType);
@@ -181,15 +217,16 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         if (!poster) return res.json([]);
 
         try {
-            const s = statSync(poster.path);
+            const stats = statSync(poster.path);
+            const dim = imageSize(poster.path);
             res.json([{
                 ImageType: "Primary",
                 ImageIndex: 0,
                 ImageTag: poster.tag,
                 Path: poster.path,
-                Height: 0,
-                Width: 0,
-                Size: s.size,
+                Height: dim.height,
+                Width: dim.width,
+                Size: stats.size,
             }]);
         } catch {
             res.json([]);
@@ -357,16 +394,19 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         if (!filePath) return res.status(404).end();
 
-        const poster = findPosterPath(filePath);
-        if (!poster) return res.status(404).end();
+        const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+        const parentDir = dir + "/..";
+        const image = findImageInDir(dir, imageType) || findImageInDir(parentDir, imageType)
+            || findPosterPath(filePath);
+        if (!image) return res.status(404).end();
 
         try {
-            const s = statSync(poster.path);
-            const ext = poster.path.split(".").pop();
+            const s = statSync(image.path);
+            const ext = image.path.split(".").pop();
             const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
             res.set("Content-Type", mime);
             res.set("Content-Length", s.size);
-            createReadStream(poster.path).pipe(res);
+            createReadStream(image.path).pipe(res);
         } catch {
             res.status(404).end();
         }
@@ -392,7 +432,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const db = getDb();
         const sys = getSystemInfo(db);
         let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
         res.json({
             LogFileRetentionDays: 7,
             IsStartupWizardCompleted: sys ? Boolean(sys.startup_wizard_completed) : false,
@@ -424,7 +464,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         const sys = getSystemInfo(db);
         let existing = {};
-        try { existing = JSON.parse(sys?.config_json || "{}"); } catch {}
+        try { existing = JSON.parse(sys?.config_json || "{}"); } catch { }
         Object.assign(existing, body);
         db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(existing));
         res.status(204).end();
@@ -441,7 +481,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                     const fs = statfsSync(p);
                     free = fs.bsize * fs.bfree;
                     used = fs.bsize * (fs.blocks - fs.bfree);
-                } catch {}
+                } catch (e) { console.error(`LiveTV fetchM3U error for ${host.Url}:`, e.message); }
                 return { Path: path.resolve(p), FreeSpace: free, UsedSpace: used, StorageType: "FileSystem", DeviceId: "local" };
             } catch { return { Path: p, FreeSpace: 0, UsedSpace: 0, StorageType: "FileSystem", DeviceId: "local" }; }
         };
@@ -548,7 +588,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                     DateModified: s.mtime.toISOString(),
                 });
             }
-        } catch {}
+        } catch { }
         res.json(list);
     });
 
@@ -583,7 +623,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                     });
                 }
             }
-        } catch {}
+        } catch { }
 
         const total = entries.length;
         const sliced = entries.slice(startIndex, startIndex + limit);
@@ -834,7 +874,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         res.status(200).json({ message: "Terminating..." });
         console.log(`System restart initiated by ${req.user.name}`);
-        killTelerisingProcess();
+        telerising.killProcess();
         setTimeout(() => process.exit(1), 500);
     });
 
@@ -844,7 +884,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         res.status(200).json({ message: "Shutting down..." });
         console.log(`System shutdown initiated by ${req.user.name}`);
-        killTelerisingProcess();
+        telerising.killProcess();
         setTimeout(() => process.exit(0), 500);
     });
 
@@ -1102,6 +1142,56 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 StartIndex: start,
             });
         }
+
+        const idsParam = req.query.Ids || req.query.ids;
+        if (idsParam) {
+            const ids = idsParam.split(",").map(s => s.replace(/-/g, "").trim());
+            const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
+            const sys = getSystemInfo(getDb());
+            const serverId = sys?.id || "hmss-local";
+            const items = [];
+            for (const rawId of ids) {
+                let item = null;
+                for (const ep of index.shows || []) {
+                    if (generateItemId(ep.id || ep.filePath) === rawId) {
+                        item = mapToJellyfinItem({ id: ep.id, title: ep.title, showName: ep.showName, season: ep.season, episode: ep.episode, year: ep.year, filePath: ep.filePath, overview: ep.overview, duration: ep.duration, genres: ep.genres }, "show", serverId);
+                        break;
+                    }
+                    if (generateItemId(ep.showName) === rawId) {
+                        item = makeShowFolder(ep, serverId);
+                        break;
+                    }
+                    const seasonId = generateItemId(`${ep.showName}-s${ep.season}`);
+                    if (seasonId === rawId) {
+                        item = makeSeasonFolder(ep, serverId);
+                        break;
+                    }
+                }
+                if (!item) for (const m of index.movies || []) {
+                    if (generateItemId(m.id || m.filePath) === rawId) {
+                        item = mapToJellyfinItem({ id: m.id, title: m.title, genre: m.group ? [m.group] : [], year: m.year, filePath: m.filePath, overview: m.overview, duration: m.duration, genres: m.genres }, "movie", serverId);
+                        break;
+                    }
+                }
+                if (!item) for (const m of index.music || []) {
+                    if (generateItemId(m.id || m.filePath) === rawId) {
+                        item = mapToJellyfinItem({ id: m.id, title: m.title, artist: m.artist, album: m.album, filePath: m.filePath }, "music", serverId);
+                        break;
+                    }
+                }
+                if (!item) for (const u of index.unsorted || []) {
+                    if (generateItemId(u.id || u.filePath) === rawId) {
+                        item = mapToJellyfinItem({ id: u.id, title: u.title, filePath: u.filePath }, "unsorted", serverId);
+                        break;
+                    }
+                }
+                if (item) items.push(item);
+            }
+            const filters = (req.query.Filters || "").split(",");
+            const filtered = filters.includes("IsNotFolder") ? items.filter(i => !i.IsFolder) : items;
+            return res.json({ Items: filtered, TotalRecordCount: filtered.length, StartIndex: 0 });
+        }
+
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
@@ -1187,33 +1277,53 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 }
             }
         }
+        // check if it's a library folder ID
+        const LIBRARY_MAP = {
+            [generateItemId("tvshows")]: { Name: "TV Shows", Type: "CollectionFolder", CollectionType: "tvshows", Path: "media/shows" },
+            [generateItemId("movies")]: { Name: "Movies", Type: "CollectionFolder", CollectionType: "movies", Path: "media/movie" },
+            [generateItemId("music")]: { Name: "Music", Type: "CollectionFolder", CollectionType: "music", Path: "media/music" },
+            [generateItemId("unsorted")]: { Name: "Unsorted", Type: "CollectionFolder", CollectionType: "mixed", Path: "media/unsorted" },
+        };
+        if (LIBRARY_MAP[rawId]) {
+            const lib = LIBRARY_MAP[rawId];
+            return res.json({
+                Name: lib.Name,
+                ServerId: serverId,
+                Id: rawId,
+                SortName: lib.Name.toLowerCase(),
+                Path: lib.Path,
+                ChannelId: null,
+                IsFolder: true,
+                Type: "CollectionFolder",
+                CollectionType: lib.CollectionType,
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(rawId), ItemId: rawId },
+                ImageTags: {},
+                BackdropImageTags: [],
+                ImageBlurHashes: {},
+                LocationType: "FileSystem",
+            });
+        }
         if (!found) return res.status(404).json({ error: "Item not found." });
 
         let probe = null;
         if (itemPath && (itemPath.endsWith(".mp4") || itemPath.endsWith(".mkv") || itemPath.endsWith(".m4a") || itemPath.endsWith(".mp3"))) {
-            try { probe = await probeMedia(itemPath); } catch {}
+            try { probe = await probeMedia(itemPath); } catch { }
         }
 
-        const id = generateItemId(found.id || found.filePath);
+        const id = itemType === "Series" ? generateItemId(found.showName) : generateItemId(found.id || found.filePath);
         if (itemType === "Season") {
-            const seasonId = generateItemId(`${found.showName}-s${found.season}`);
-            const seasonPoster = findPosterPath(found.filePath);
-            return res.json({
-                Name: found.season === 0 ? "Specials" : `Season ${found.season}`,
-                ServerId: serverId,
-                Id: seasonId,
-                SortName: `Season ${String(found.season).padStart(2, "0")}`,
-                IndexNumber: found.season,
-                SeriesName: found.showName,
-                SeriesId: generateItemId(found.showName),
-                IsFolder: true,
-                Type: "Season",
-                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: seasonId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"), ItemId: seasonId },
-                ImageTags: seasonPoster ? { Primary: seasonPoster.tag } : {},
-                BackdropImageTags: [],
-                ImageBlurHashes: seasonPoster ? { Primary: {} } : {},
-                LocationType: "FileSystem",
-            });
+            const showId = generateItemId(found.showName);
+            for (const ep2 of index.shows || []) {
+                if (generateItemId(ep2.showName) === showId) {
+                    itemType = "Series";
+                    found = ep2;
+                    itemPath = null;
+                    break;
+                }
+            }
+        }
+        if (itemType === "Series") {
+            return res.json(makeShowFolder(found, serverId));
         }
         const parentId = itemType === "Movie" ? generateItemId("movies") : itemType === "Episode" ? generateItemId(found.showName) : itemType === "Video" ? generateItemId("unsorted") : generateItemId("music");
         const isMovie = itemType === "Movie";
@@ -1248,7 +1358,21 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const poster = findPosterPath(itemPath);
         const meta = getItemMeta(itemPath);
 
-        res.json({
+        let imageTags = poster ? { Primary: poster.tag } : {};
+        let backdropImageTags = [];
+        let logoTag = null;
+
+        if (itemType === "Series") {
+            const showDir = `media/shows/${found.showName}`;
+            const primaryImg = findImageInDir(showDir, "Primary");
+            if (primaryImg) imageTags = { Primary: primaryImg.tag };
+            const backdropImg = findImageInDir(showDir, "Backdrop");
+            if (backdropImg) backdropImageTags = [backdropImg.tag];
+            const logoImg = findImageInDir(showDir, "Logo");
+            if (logoImg) { logoTag = logoImg.tag; imageTags.Logo = logoTag; }
+        }
+
+        const resp = {
             Name: meta?.name || found.title || "Unknown",
             Overview: meta?.overview || undefined,
             Genres: meta?.genres || [],
@@ -1276,14 +1400,15 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 Key: id.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"),
                 ItemId: id,
             },
-            ImageTags: poster ? { Primary: poster.tag } : {},
-            BackdropImageTags: [],
+            ImageTags: imageTags,
+            BackdropImageTags: backdropImageTags,
             ImageBlurHashes: poster ? { Primary: {} } : {},
             LocationType: "FileSystem",
             MediaType: (isMovie || isEpisode || itemType === "Video") ? "Video" : "Audio",
             VideoType: (isMovie || isEpisode || itemType === "Video") ? "VideoFile" : undefined,
             PrimaryImageAspectRatio: probe?.width && probe?.height ? probe.width / probe.height : 0,
-        });
+        };
+        res.json(resp);
     }
 
 }
@@ -1310,7 +1435,7 @@ export async function addonRoutes(app) {
     });
 }
 
-export async function jellyfinRoutes(app, getDb, apiVersion) {
+export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {}) {
 
     // === Artist ===
     app.get('/Artists', (req, res) => { /* GetArtists */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1429,7 +1554,36 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     app.get('/Branding/Css', (req, res) => { /* GetBrandingCss */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === Channel ===
-    app.get('/Channels', (req, res) => { /* GetChannels */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Channels', async (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const allChannels = await getLiveTvChannels(db);
+        const sys = getSystemInfo(db);
+        const serverId = sys?.id || "hmss-local";
+        const items = allChannels.map(ch => ({
+            Name: ch.Name,
+            ServerId: serverId,
+            Id: ch.Id,
+            DateCreated: new Date().toISOString(),
+            CanDelete: false,
+            CanDownload: false,
+            SortName: ch.SortName,
+            ExternalUrls: [],
+            Path: "",
+            ChannelId: null,
+            IsFolder: false,
+            Type: "TvChannel",
+            UserData: ch.UserData,
+            ImageTags: ch.ImageTags,
+            BackdropImageTags: [],
+            ImageBlurHashes: {},
+            LocationType: "Remote",
+            MediaType: "Video",
+        }));
+        const limit = parseInt(req.query.Limit) || items.length;
+        const start = parseInt(req.query.StartIndex) || 0;
+        res.json({ Items: items.slice(start, start + limit), TotalRecordCount: items.length, StartIndex: start });
+    });
     app.get('/Channels/Features', (req, res) => { /* GetAllChannelFeatures */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Channels/Items/Latest', (req, res) => { /* GetLatestChannelItems */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Channels/:channelId/Features', (req, res) => { /* GetChannelFeatures */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1583,7 +1737,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     app.get('/Items/:itemId/Collections', (req, res) => { /* GetItemCollections */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Download', (req, res) => { /* GetDownload */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/File', (req, res) => { /* GetFile */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Users/:itemId/Items/:itemId/Intros', (req, res) => { /* GetIntros */ res.status(200).json({"Items":[],"TotalRecordCount":0,"StartIndex":0}); });
+    app.get('/Users/:itemId/Items/:itemId/Intros', (req, res) => { /* GetIntros */ res.status(200).json({ "Items": [], "TotalRecordCount": 0, "StartIndex": 0 }); });
     app.get('/Items/:itemId/LocalTrailers', (req, res) => { /* GetLocalTrailers */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Items/:itemId/Refresh', (req, res) => { /* RefreshItem */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Similar', (req, res) => {
@@ -1651,12 +1805,45 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
         res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
     app.get('/Items/:itemId/SpecialFeatures', (req, res) => { /* GetSpecialFeatures */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/:itemId/ThemeMedia', (req, res) => { /* GetThemeMedia */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Items/:itemId/ThemeMedia', (req, res) => {
+        const ownerId = (req.params.itemId || "").replace(/-/g, "");
+        res.json({
+            ThemeVideosResult: { OwnerId: ownerId, Items: [], TotalRecordCount: 0, StartIndex: 0 },
+            ThemeSongsResult: { OwnerId: ownerId, Items: [], TotalRecordCount: 0, StartIndex: 0 },
+            SoundtrackSongsResult: { OwnerId: "00000000000000000000000000000000", Items: [], TotalRecordCount: 0, StartIndex: 0 },
+        });
+    });
     app.get('/Items/:itemId/ThemeSongs', (req, res) => { /* GetThemeSongs */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/ThemeVideos', (req, res) => { /* GetThemeVideos */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Libraries/AvailableOptions', (req, res) => { /* GetLibraryOptionsInfo */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Library/Media/Updated', (req, res) => { /* PostUpdatedMedia */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Library/MediaFolders', (req, res) => { /* GetMediaFolders */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Library/MediaFolders', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const isHidden = req.query.isHidden === "true";
+        const items = [];
+        for (const [key, paths] of Object.entries(mediaDirs)) {
+            for (const p of paths) {
+                items.push({
+                    Name: key.charAt(0).toUpperCase() + key.slice(1),
+                    ServerId: getSystemInfo(getDb())?.id || "hmss-local",
+                    Id: generateItemId(key),
+                    DateCreated: new Date().toISOString(),
+                    CanDelete: false,
+                    CanDownload: false,
+                    SortName: key.toLowerCase(),
+                    Path: p,
+                    IsFolder: true,
+                    Type: "CollectionFolder",
+                    CollectionType: key === "movie" ? "movies" : key === "shows" ? "tvshows" : key === "music" ? "music" : "mixed",
+                    LocationType: "FileSystem",
+                    ImageTags: {},
+                    BackdropImageTags: [],
+                    ImageBlurHashes: {},
+                });
+            }
+        }
+        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
+    });
     app.post('/Library/Movies/Added', (req, res) => { /* PostAddedMovies */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Library/Movies/Updated', (req, res) => { /* PostUpdatedMovies */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Library/PhysicalPaths', (req, res) => { /* GetPhysicalPaths */ res.status(200).json({ message: 'Not implemented' }); });
@@ -1683,7 +1870,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     function getLiveTvConfig(db) {
         const sys = getSystemInfo(db);
         let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
         return stored.livetv || {
             EnableRecordingSubfolders: false,
             EnableOriginalAudioWithEncodedRecordings: false,
@@ -1701,7 +1888,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     function setLiveTvConfig(db, config) {
         const sys = getSystemInfo(db);
         let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
         stored.livetv = config;
         db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
     }
@@ -1753,7 +1940,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
                         UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false },
                     });
                 }
-            } catch {}
+            } catch { }
         }
         _liveTvCache = { channels: all, ts: Date.now() };
         return all;
@@ -1915,7 +2102,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
         if (!req.user) return res.status(401).end();
         const db = getDb();
         const config = getLiveTvConfig(db);
-        const id = req.query.Id || req.body?.Id;
+        const id = req.query.id || req.body?.id;
 
         if (!id) return res.status(400).json({ error: "Id required." });
 
@@ -1932,14 +2119,34 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
         ]);
     });
 
-    app.get('/LiveTv/Tuners/Discover', (req, res) => {
+    app.get('/LiveTv/Tuners/Discover', (req, res) => { /* Add auto discover of Telerising */
         if (!req.user) return res.status(401).end();
-        res.json([]);
-    });
-
-    app.get('/LiveTv/Tuners/Discvover', (req, res) => {
-        if (!req.user) return res.status(401).end();
-        res.json([]);
+        const accounts = telerising.listActiveProvider();
+        const localIp = telerising.getLocalIp();
+        const entries = [];
+        if (accounts && typeof accounts === 'object') {
+            for (const [provider, info] of Object.entries(accounts)) {
+                entries.push({
+                    "Id": provider,
+                    "Url": `http://${localIp}:${telerising.telerisingPort}/api/${provider}/file/channels.m3u`,
+                    "Type": "m3u",
+                    "DeviceId": "",
+                    "FriendlyName": "Telerising " + provider,
+                    "ImportFavoritesOnly": false,
+                    "AllowHWTranscoding": false,
+                    "AllowFmp4TranscodingContainer": false,
+                    "AllowStreamSharing": false,
+                    "FallbackMaxStreamingBitrate": 0,
+                    "EnableStreamLooping": false,
+                    "Source": "Telerising",
+                    "TunerCount": 0,
+                    "UserAgent": "",
+                    "IgnoreDts": true,
+                    "ReadAtNativeFramerate": true
+                });
+            }
+        }
+        res.json(entries);
     });
 
     app.get('/LiveTv/Programs', (req, res) => {
@@ -2063,7 +2270,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
 
         let probe = null;
         if (itemPath && /\.(mp4|mkv|m4a|mp3|avi|mov|ts|flac|ogg)$/i.test(itemPath)) {
-            try { probe = await probeMedia(itemPath); } catch {}
+            try { probe = await probeMedia(itemPath); } catch { }
         }
         return { found, itemPath, itemType, probe };
     }
@@ -2282,12 +2489,42 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     // === ScheduledTask ===
     app.get('/ScheduledTasks', (req, res) => {
         if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
-        res.json([]);
+        res.json([
+            {
+                "Name": "Scan Media Library",
+                "State": "Idle",
+                "Id": "7738148ffcd07979c7ceb148e06b3aed",
+                "LastExecutionResult": {
+                    "StartTimeUtc": "2026-07-25T19:10:57.8381968Z",
+                    "EndTimeUtc": "2026-07-25T19:11:05.0696788Z",
+                    "Status": "Completed",
+                    "Name": "Scan Media Library",
+                    "Key": "RefreshLibrary",
+                    "Id": "7738148ffcd07979c7ceb148e06b3aed"
+                },
+                "Triggers": [
+                    {
+                        "Type": "IntervalTrigger",
+                        "IntervalTicks": 432000000000
+                    }
+                ],
+                "Description": "Scans your media library for new files and refreshes metadata.",
+                "Category": "Library",
+                "IsHidden": false,
+                "Key": "RefreshLibrary"
+            }]);
     });
-    app.delete('/ScheduledTasks/Running/:taskId', (req, res) => { /* StopTask */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/ScheduledTasks/Running/:taskId', (req, res) => { /* StartTask */ res.status(200).json({ message: 'Not implemented' }); });
+    app.delete('/ScheduledTasks/Running/:taskId', (req, res) => { /* StopTask */ res.status(204).json({ message: 'Not implemented' }); });
+    app.post('/ScheduledTasks/Running/:taskId', (req, res) => {
+        const taskId = req.params.taskId;
+        switch (taskId) {
+            case "7738148ffcd07979c7ceb148e06b3aed":
+                server.StartMediaIndex()
+        }
+        res.status(200).json({ message: 'Not implemented' });
+    });
     app.get('/ScheduledTasks/:taskId', (req, res) => { /* GetTask */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/ScheduledTasks/:taskId/Triggers', (req, res) => { /* UpdateTask */ res.status(200).json({ message: 'Not implemented' }); });
+    app.post('/ScheduledTasks/:taskId/Triggers', (req, res) => { res.status(200); });
 
     // === Search ===
     app.get('/Search/Hints', (req, res) => { /* GetSearchHints */ res.status(200).json({ message: 'Not implemented' }); });
@@ -2329,6 +2566,16 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
         }
         if (!showName) return res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
 
+        const showDir = `media/shows/${showName}`;
+        const backdropImg = findImageInDir(showDir, "Backdrop");
+        const logoImg = findImageInDir(showDir, "Logo");
+        const parentBackdropTags = backdropImg ? [backdropImg.tag] : [];
+        const parentLogoTag = logoImg ? logoImg.tag : null;
+        const parentImageTags = {};
+        const primaryImg = findImageInDir(showDir, "Primary");
+        if (primaryImg) parentImageTags.Primary = primaryImg.tag;
+        if (parentLogoTag) parentImageTags.Logo = parentLogoTag;
+
         let episodes = (index.shows || []).filter(ep => ep.showName === showName);
         if (seasonId) {
             episodes = episodes.filter(ep => generateItemId(`${ep.showName}-s${ep.season}`) === seasonId);
@@ -2339,7 +2586,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
             const poster = findPosterPath(ep.filePath);
             const runTimeTicks = ep.duration ? Math.round(ep.duration * 10000000) : 0;
             return {
-                Name: ep.title || `S${String(ep.season).padStart(2,"0")}E${String(ep.episode).padStart(2,"0")}`,
+                Name: ep.title || `S${String(ep.season).padStart(2, "0")}E${String(ep.episode).padStart(2, "0")}`,
                 OriginalTitle: ep.title || "",
                 ServerId: serverId,
                 Id: itemId,
@@ -2379,7 +2626,10 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
                     ItemId: itemId,
                 },
                 ImageTags: poster ? { Primary: poster.tag } : {},
-                BackdropImageTags: [],
+                BackdropImageTags: parentBackdropTags,
+                ParentBackdropImageTags: parentBackdropTags,
+                ParentLogoImageTags: parentLogoTag ? [parentLogoTag] : [],
+                ParentImageTags: parentImageTags,
                 ImageBlurHashes: poster ? { Primary: {} } : {},
                 LocationType: "FileSystem",
                 MediaType: "Video",
@@ -2393,7 +2643,46 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
             StartIndex: start,
         });
     });
-    app.get('/Shows/:seriesId/Seasons', (req, res) => { /* GetSeasons */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Shows/:seriesId/Seasons', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const sys = getSystemInfo(getDb());
+        const serverId = sys?.id || "hmss-local";
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const seriesId = req.params.seriesId.replace(/-/g, "");
+        let showName = null;
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.showName) === seriesId) { showName = ep.showName; break; }
+        }
+        if (!showName) return res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+        const episodes = (index.shows || []).filter(ep => ep.showName === showName);
+        const seasonMap = {};
+        for (const ep of episodes) {
+            if (!seasonMap[ep.season]) {
+                const seasonId = generateItemId(`${showName}-s${ep.season}`);
+                const seasonPoster = findPosterPath(ep.filePath);
+                seasonMap[ep.season] = {
+                    Name: ep.season === 0 ? "Specials" : `Season ${ep.season}`,
+                    ServerId: serverId,
+                    Id: seasonId,
+                    SortName: `Season ${String(ep.season).padStart(2, "0")}`,
+                    IndexNumber: ep.season,
+                    SeriesName: showName,
+                    SeriesId: seriesId,
+                    IsFolder: true,
+                    Type: "Season",
+                    UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: seasonId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"), ItemId: seasonId },
+                    ImageTags: seasonPoster ? { Primary: seasonPoster.tag } : {},
+                    BackdropImageTags: [],
+                    ImageBlurHashes: seasonPoster ? { Primary: {} } : {},
+                    LocationType: "FileSystem",
+                };
+            }
+        }
+        const seasons = Object.values(seasonMap).sort((a, b) => (a.IndexNumber || 0) - (b.IndexNumber || 0));
+        const start = parseInt(req.query.StartIndex) || 0;
+        const limit = parseInt(req.query.Limit) || seasons.length;
+        res.json({ Items: seasons.slice(start, start + limit), TotalRecordCount: seasons.length, StartIndex: start });
+    });
 
     // === Startup ===
     app.get('/Startup/FirstUser', (req, res) => { /* GetFirstUser_2 */ res.status(200).json({ message: 'Not implemented' }); });
@@ -2450,13 +2739,39 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
         const db = getDb();
         const key = req.params.key;
 
-        if (key === "livetv") {
-            return res.json(getLiveTvConfig(db));
+        switch (key) {
+            case "livetv":
+                return res.status(200).json(getLiveTvConfig(db));
+            case "network":
+                return res.status(200).json({
+                    BaseUrl: `http://${getLocalIPv4()}:${port}`,
+                    EnableHttps: false,
+                    RequireHttps: false,
+                    CertificatePath: "",
+                    CertificatePassword: "",
+                    InternalHttpPort: port,
+                    InternalHttpsPort: port + 1,
+                    PublicHttpPort: port,
+                    PublicHttpsPort: port + 1,
+                    AutoDiscovery: true,
+                    EnableUPnP: true,
+                    EnableIPv4: true,
+                    EnableIPv6: false,
+                    EnableRemoteAccess: true,
+                    LocalNetworkSubnets: [],
+                    LocalNetworkAddresses: ["lo", getLocalIPv4()],
+                    KnownProxies: [],
+                    IgnoreVirtualInterfaces: [],
+                    EnablePublishedServerUriByRequest: true,
+                    PublishedServerUriBySubnet: [],
+                    RemoteIPFilter: [],
+                    IsRemoteIPFilterBlacklist: true
+                })
         }
 
         const sys = getSystemInfo(db);
         let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
         if (stored[key] !== undefined) return res.json(stored[key]);
         res.json({});
     });
@@ -2473,7 +2788,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
 
         const sys = getSystemInfo(db);
         let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch {}
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
         stored[key] = body;
         db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
         res.json({ StatusCode: 200 });
@@ -2491,10 +2806,80 @@ export async function jellyfinRoutes(app, getDb, apiVersion) {
     // === User ===
     app.post('/Users', (req, res) => { /* UpdateUser */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Users/Configuration', (req, res) => { /* UpdateUserConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Users/New', (req, res) => { /* CreateUserByName */ res.status(200).json({ message: 'Not implemented' }); });
+    app.post('/Users/New', async (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const db = getDb();
+        const { Name, Password } = req.body || {};
+        if (!Name || !Password) return res.status(400).json({ error: "Name and Password required." });
+
+        const existingUser = db.prepare("SELECT id FROM users WHERE name = ?").get(Name);
+        if (existingUser) return res.status(400).json({ error: "User already exists." });
+
+        const argon2 = (await import("argon2")).default;
+        const passwordHash = await argon2.hash(Password, { type: argon2.argon2id });
+        const uuid = crypto.randomUUID();
+        const id = db.prepare("INSERT INTO users (name, password_hash, perms, uuid) VALUES (?, ?, ?, ?)")
+            .run(Name, passwordHash, 0, uuid).lastInsertRowid;
+
+        res.json({
+            Name,
+            ServerId: getSystemInfo(db)?.id || "hmss-local",
+            Id: uuid.replace(/-/g, ""),
+            HasPassword: true,
+            HasConfiguredPassword: true,
+            HasConfiguredAutoLogin: false,
+            LastActivityDate: null,
+            LastLoginDate: null,
+            PrimaryImageAspectRatio: null,
+            Created: new Date().toISOString(),
+            Policy: {
+                IsAdministrator: false,
+                IsHidden: false,
+                IsDisabled: false,
+                MaxParentalRating: 0,
+                MaxParentalRatingSubItems: 0,
+                AuthenticationProviderId: "Jellyfin.Server.Implementations.Security.DefaultAuthenticationProvider",
+                PasswordResetProviderId: "Jellyfin.Server.Implementations.Security.DefaultPasswordResetProvider",
+                EnableUserPreferenceSync: false,
+                RemoteClientBitrateLimit: 0,
+                AuthenticationProvider: "Default",
+                PasswordResetProvider: "Default",
+            },
+            PrimaryImageTag: null,
+        });
+    });
     app.post('/Users/Password', (req, res) => { /* UpdateUserPassword */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/Users/:userId', (req, res) => { /* DeleteUser */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Users/:userId/Policy', (req, res) => { /* UpdateUserPolicy */ res.status(200).json({ message: 'Not implemented' }); });
+    app.delete('/Users/:userId', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        if (req.user.perms < 2) return res.status(403).end();
+        const db = getDb();
+        const userId = req.params.userId;
+        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
+        let user = db.prepare("SELECT id, name FROM users WHERE uuid = ?").get(userId);
+        if (!user) user = db.prepare("SELECT id, name FROM users WHERE uuid = ?").get(withDashes);
+        if (!user) user = db.prepare("SELECT id, name FROM users WHERE id = ?").get(userId);
+        if (!user) return res.status(404).json({ error: "User not found." });
+        if (user.name === "root") return res.status(400).json({ error: "Cannot delete root user." });
+        if (user.id === req.user.id) return res.status(400).json({ error: "Cannot delete yourself." });
+        db.prepare("DELETE FROM sessions WHERE user_id = ?").run(user.id);
+        db.prepare("DELETE FROM users WHERE id = ?").run(user.id);
+        console.log(`User '${user.name}' (${user.id}) deleted by '${req.user.name}'.`);
+        res.status(204).end();
+    });
+    app.post('/Users/:userId/Policy', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        if (req.user.perms < 2) return res.status(403).end();
+        const db = getDb();
+        const userId = req.params.userId;
+        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
+        let user = db.prepare("SELECT id, uuid FROM users WHERE uuid = ?").get(userId);
+        if (!user) user = db.prepare("SELECT id, uuid FROM users WHERE uuid = ?").get(withDashes);
+        if (!user) user = db.prepare("SELECT id, uuid FROM users WHERE id = ?").get(userId);
+        if (!user) return res.status(404).json({ error: "User not found." });
+        const policy = req.body || {};
+        db.prepare("UPDATE users SET policy_json = ? WHERE id = ?").run(JSON.stringify(policy), user.id);
+        res.status(204).end();
+    });
 
     // === UserData ===
     app.delete('/UserFavoriteItems/:itemId', (req, res) => { /* UnmarkFavoriteItem */ res.status(200).json({ message: 'Not implemented' }); });

@@ -4,3 +4,6 @@ description: "Metadata provider using TheMovieDB API"
 capabilities:
   - metadata
   - search
+mediaTypes:
+  - movie
+  - show

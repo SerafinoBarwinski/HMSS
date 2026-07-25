@@ -19,7 +19,7 @@ export function getItemMeta(filePath) {
     const episodeMeta = readMeta(dir);
     const showMeta = readMeta(parentDir);
     return {
-        name: episodeMeta?.enriched_name || episodeMeta?.name || showMeta?.enriched_name || showMeta?.name || null,
+        name: episodeMeta?.enriched_name || episodeMeta?.name || showMeta?.name || showMeta?.enriched_name || null,
         overview: episodeMeta?.overview || showMeta?.overview || "",
         year: episodeMeta?.year || showMeta?.year || null,
         genres: showMeta?.genre || [],

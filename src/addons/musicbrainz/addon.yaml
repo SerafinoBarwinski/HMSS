@@ -4,3 +4,5 @@ description: "Metadata for music via MusicBrainz API. No API key required."
 capabilities:
   - metadata
   - search
+mediaTypes:
+  - music

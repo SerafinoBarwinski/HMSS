@@ -1,7 +1,7 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { stringify } from "yaml";
-import { getAddonsByCapability } from "./addon_loader.js";
+import { getAddonsByCapability, getAddonsByCapabilityAndType, isAnime, countFields } from "./addon_loader.js";
 
 export async function organizeShows(shows, options = {}) {
     const results = [];
@@ -115,89 +115,154 @@ export async function organizeMusic(tracks, options = {}) {
 }
 
 async function enrichWithMetadata(item, targetDir, results) {
-    const providers = getAddonsByCapability("metadata");
-    if (providers.length === 0) return;
+    const isShow = !!item.showName;
+    const searchName = isShow ? item.showName : path.basename(item.filePath);
+    const anime = isShow && isAnime(item.showName);
 
-    const query = {
-        filename: path.basename(item.filePath),
-        type: item.showName ? "show" : "movie",
-    };
+    const metaPath = path.join(targetDir, "meta.yaml");
+    const { parse: yamlParse } = await import("yaml");
+    const { readFile } = await import("node:fs/promises");
 
-    for (const provider of providers) {
-        try {
-            if (!provider.module.identify) continue;
-            const result = await provider.module.identify({
-                filename: path.basename(item.filePath),
-                type: item.showName ? "show" : "movie",
-            });
-            if (!result) continue;
+    let existingParsed = {};
+    try {
+        existingParsed = yamlParse(await readFile(metaPath, "utf-8")) || {};
+    } catch {}
 
-            const metaPath = path.join(targetDir, "meta.yaml");
-            const { parse: yamlParse } = await import("yaml");
-            const { readFile } = await import("node:fs/promises");
+    // collect results from all matching providers
+    const candidates = [];
+    const mediaType = isShow ? "show" : "movie";
+    const capList = anime ? ["anime-meta", "metadata"] : ["metadata"];
+    const seenCaps = new Set();
 
+    for (const cap of capList) {
+        if (seenCaps.has(cap)) continue;
+        seenCaps.add(cap);
+        const providers = getAddonsByCapabilityAndType(cap, mediaType);
+        for (const provider of providers) {
             try {
-                const existing = await readFile(metaPath, "utf-8");
-                const parsed = yamlParse(existing);
-                parsed.enriched_name = result.name;
-                parsed.overview = result.overview;
-                parsed.tmdb_id = result.id;
-                parsed.year = result.year || parsed.year;
+                if (!provider.module.identify) continue;
+                const result = await provider.module.identify({
+                    filename: searchName,
+                    type: mediaType,
+                });
+                if (!result) continue;
 
-                // fetch external IDs for artwork providers
-                const type = item.showName ? "show" : "movie";
+                let external = null;
                 try {
                     if (provider.module.getExternalIds) {
-                        const external = await provider.module.getExternalIds(result.id, type);
-                        if (external) {
-                            parsed.tvdb_id = external.tvdb_id;
-                            parsed.imdb_id = external.imdb_id;
-                        }
+                        external = await provider.module.getExternalIds(result.id, mediaType);
                     }
                 } catch {}
 
-                await writeFile(metaPath, stringify(parsed));
-                results.push({ type: "enrich", path: targetDir, source: provider.id, name: result.name });
-            } catch {}
-        } catch (e) {
-            console.warn(`Enrich failed for ${item.filePath}: ${e.message}`);
+                candidates.push({ result, external, source: provider.id });
+            } catch (e) {
+                console.warn(`Enrich '${provider.id}' failed for ${item.filePath}: ${e.message}`);
+            }
         }
     }
+
+    if (candidates.length === 0) return;
+
+    // pick candidate with most filled fields
+    let best = candidates[0];
+    let bestScore = countFields(best.result);
+    for (let i = 1; i < candidates.length; i++) {
+        const score = countFields(candidates[i].result);
+        if (score > bestScore) {
+            best = candidates[i];
+            bestScore = score;
+        }
+    }
+
+    // merge into meta.yaml — never overwrite existing `name`
+    existingParsed.overview = best.result.overview || existingParsed.overview;
+    existingParsed.tmdb_id = best.result.id;
+    existingParsed.year = best.result.year || existingParsed.year;
+    if (best.result.genres && best.result.genres.length > 0) existingParsed.genre = best.result.genres;
+    existingParsed.metadata_provider = best.source;
+    if (best.external) {
+        existingParsed.tvdb_id = best.external.tvdb_id || existingParsed.tvdb_id;
+        existingParsed.imdb_id = best.external.imdb_id || existingParsed.imdb_id;
+    }
+    if (anime) existingParsed.anime = true;
+
+    // fetch full details from TMDB
+    let details = null;
+    const tmdbList = getAddonsByCapability("metadata").filter(p => p.id === "tmdb");
+    const tmdbProvider = tmdbList[0];
+    if (tmdbProvider?.module?.getDetails && best.result.id) {
+        try {
+            details = await tmdbProvider.module.getDetails(best.result.id, mediaType);
+        } catch (e) {
+            console.warn(`TMDB getDetails failed for ${searchName}: ${e.message}`);
+        }
+    }
+
+    if (details) {
+        existingParsed.original_title = details.original_title || existingParsed.original_title;
+        existingParsed.official_rating = details.official_rating || existingParsed.official_rating;
+        existingParsed.community_rating = details.community_rating || existingParsed.community_rating;
+        existingParsed.status = details.status || existingParsed.status;
+        existingParsed.premiere_date = details.premiere_date || existingParsed.premiere_date;
+        existingParsed.end_date = details.end_date || existingParsed.end_date;
+        existingParsed.taglines = details.taglines?.length ? details.taglines : existingParsed.taglines;
+        existingParsed.tags = details.tags?.length ? details.tags : existingParsed.tags;
+        existingParsed.trailers = details.trailers?.length ? details.trailers : existingParsed.trailers;
+        existingParsed.people = details.people?.length ? details.people : existingParsed.people;
+        existingParsed.studios = details.studios?.length ? details.studios : existingParsed.studios;
+        existingParsed.external_urls = details.external_urls?.length ? details.external_urls : existingParsed.external_urls;
+        existingParsed.provider_ids = details.provider_ids || existingParsed.provider_ids;
+        existingParsed.child_count = details.child_count || existingParsed.child_count;
+        existingParsed.episode_count = details.episode_count || existingParsed.episode_count;
+        if (details.genres?.length) existingParsed.genre = details.genres;
+        if (details.original_title) existingParsed.original_title = details.original_title;
+    }
+
+    await writeFile(metaPath, stringify(existingParsed));
+    results.push({ type: "enrich", path: targetDir, source: best.source, name: best.result.name });
 }
 
 async function downloadArtwork(item, targetDir, results) {
-    const providers = getAddonsByCapability("artwork");
-    if (providers.length === 0) return;
+    const isShow = !!item.showName;
+    const anime = isShow && isAnime(item.showName);
+    const mediaType = isShow ? "show" : "movie";
 
-    for (const provider of providers) {
-        try {
-            if (!provider.module.downloadBest) continue;
+    const capList = anime ? ["anime-artwork", "artwork"] : ["artwork"];
+    const seenCaps = new Set();
 
-            const metaPath = path.join(targetDir, "meta.yaml");
-            let tmdbId = null;
-            let tvdbId = null;
+    for (const cap of capList) {
+        if (seenCaps.has(cap)) continue;
+        seenCaps.add(cap);
+        const providers = getAddonsByCapabilityAndType(cap, mediaType);
+        for (const provider of providers) {
             try {
-                const { parse: yamlParse } = await import("yaml");
-                const { readFile } = await import("node:fs/promises");
-                const parsed = yamlParse(await readFile(metaPath, "utf-8"));
-                tmdbId = parsed.tmdb_id;
-                tvdbId = parsed.tvdb_id;
-            } catch {}
+                if (!provider.module.downloadBest) continue;
 
-            if (!tmdbId) continue;
+                const metaPath = path.join(targetDir, "meta.yaml");
+                let tmdbId = null;
+                let tvdbId = null;
+                try {
+                    const { parse: yamlParse } = await import("yaml");
+                    const { readFile } = await import("node:fs/promises");
+                    const parsed = yamlParse(await readFile(metaPath, "utf-8"));
+                    tmdbId = parsed.tmdb_id;
+                    tvdbId = parsed.tvdb_id;
+                } catch {}
 
-            const fanartId = (item.showName && tvdbId) ? tvdbId : tmdbId;
+                if (cap === "artwork" && !tmdbId) continue;
 
-            const downloads = await provider.module.downloadBest({
-                tmdbId: fanartId,
-                type: item.showName ? "show" : "movie",
-                targetDir,
-            });
-            for (const d of downloads) {
-                results.push({ type: "artwork", path: d.path, artworkType: d.type });
+                const downloads = await provider.module.downloadBest({
+                    tmdbId,
+                    showName: item.showName || item.title || "",
+                    type: mediaType,
+                    targetDir,
+                });
+                for (const d of downloads) {
+                    results.push({ type: "artwork", path: d.path, artworkType: d.type });
+                }
+            } catch (e) {
+                console.warn(`Artwork download failed for ${item.filePath}: ${e.message}`);
             }
-        } catch (e) {
-            console.warn(`Artwork download failed for ${item.filePath}: ${e.message}`);
         }
     }
 }

@@ -3,19 +3,31 @@ import { getItemMeta } from "./meta_reader.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 
-export function findPosterPath(filePath) {
-    if (!filePath) return null;
-    const dirs = [filePath.substring(0, filePath.lastIndexOf("/")), filePath.substring(0, filePath.lastIndexOf("/")) + "/.."];
+const IMAGE_SEARCH = {
+    Primary: [["poster", "crunchyroll_poster"], ["folder"]],
+    Backdrop: [["hero", "crunchyroll_backdrop", "backdrop", "fanart"]],
+    Logo: [["logo", "crunchyroll_logo"]],
+};
 
-    for (const dir of dirs) {
-        for (const ext of [".jpg", ".png", ".webp"]) {
-            for (const name of ["poster", "hero", "folder"]) {
+export function findImageInDir(dir, imageType) {
+    if (!dir) return null;
+    const candidates = IMAGE_SEARCH[imageType] || IMAGE_SEARCH.Primary;
+    for (const names of candidates) {
+        for (const name of names) {
+            for (const ext of [".jpg", ".png", ".webp"]) {
                 const fp = `${dir}/${name}${ext}`;
                 if (existsSync(fp)) return { path: fp, tag: generateItemId(fp) };
             }
         }
     }
     return null;
+}
+
+export function findPosterPath(filePath) {
+    if (!filePath) return null;
+    const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+    const parentDir = dir + "/..";
+    return findImageInDir(dir, "Primary") || findImageInDir(parentDir, "Primary");
 }
 
 export function mapToJellyfinItem(item, type, serverId) {
@@ -54,17 +66,51 @@ export function mapToJellyfinItem(item, type, serverId) {
     };
 
     const poster = findPosterPath(item.filePath);
+    const dir = item.filePath ? item.filePath.substring(0, item.filePath.lastIndexOf("/")) : null;
+    const parentDir = dir ? dir + "/.." : null;
+
+    const backdrop = (dir && findImageInDir(dir, "Backdrop")) || (parentDir && findImageInDir(parentDir, "Backdrop"));
+    const logo = (dir && findImageInDir(dir, "Logo")) || (parentDir && findImageInDir(parentDir, "Logo"));
+
     base.ImageTags = poster ? { Primary: poster.tag } : {};
-    base.BackdropImageTags = [];
-    base.ImageBlurHashes = poster ? { Primary: {} } : {};
+    if (logo) base.ImageTags.Logo = logo.tag;
+    base.BackdropImageTags = backdrop ? [backdrop.tag] : [];
+    base.ImageBlurHashes = {};
+    if (poster) base.ImageBlurHashes.Primary = {};
+    if (backdrop) base.ImageBlurHashes.Backdrop = {};
+    if (logo) base.ImageBlurHashes.Logo = {};
 
     if (isEpisode) {
+        const showDir = `media/shows/${item.showName}`;
+        const showBackdrop = findImageInDir(showDir, "Backdrop");
+        const showLogo = findImageInDir(showDir, "Logo");
+        const showPoster = findImageInDir(showDir, "Primary");
+
         base.SeriesName = item.showName;
         base.SeasonId = seasonId;
         base.SeriesId = showId;
         base.IndexNumber = item.episode;
         base.ParentIndexNumber = item.season;
+        base.SeasonName = `Season ${item.season}`;
         base.VideoType = "VideoFile";
+        base.ParentBackdropItemId = showId;
+        base.ParentBackdropImageTags = showBackdrop ? [showBackdrop.tag] : [];
+        base.ParentLogoItemId = showId;
+        base.ParentLogoImageTag = showLogo ? showLogo.tag : null;
+        base.ParentThumbItemId = showId;
+        base.ParentThumbImageTag = showPoster ? showPoster.tag : null;
+        base.SeriesPrimaryImageTag = showPoster ? showPoster.tag : null;
+
+        base.ImageBlurHashes = {};
+        if (poster) base.ImageBlurHashes.Primary = {};
+        if (showBackdrop) {
+            base.ImageBlurHashes.Backdrop = {};
+            base.ImageBlurHashes.Backdrop[showBackdrop.tag] = "";
+        }
+        if (showLogo) {
+            base.ImageBlurHashes.Logo = {};
+            base.ImageBlurHashes.Logo[showLogo.tag] = "";
+        }
     }
 
     if (isMovie) {
@@ -275,32 +321,73 @@ export function filteredItemsFromIndex(index, serverId, { parentId, includeItemT
     return { Items: items.slice(skip, skip + maxLimit), TotalRecordCount: total, StartIndex: skip };
 }
 
-function makeShowFolder(ep, serverId) {
+export function makeShowFolder(ep, serverId) {
     const sid = generateItemId(ep.showName);
-    const poster = findPosterInDir(`media/shows/${ep.showName}`);
-    const meta = readMetaForDir(`media/shows/${ep.showName}`);
+    const dir = `media/shows/${ep.showName}`;
+    const poster = findImageInDir(dir, "Primary");
+    const backdrop = findImageInDir(dir, "Backdrop");
+    const logo = findImageInDir(dir, "Logo");
+    const thumb = findImageInDir(dir, "Thumb") || poster;
+    const meta = readMetaForDir(dir);
+    const imgTags = poster ? { Primary: poster.tag } : {};
+    if (logo) imgTags.Logo = logo.tag;
+    if (thumb && thumb !== poster) imgTags.Thumb = thumb.tag;
+
+    const genres = meta?.genre || [];
+    const genreItems = genres.map(g => ({ Name: g, Id: generateItemId(g) }));
+
+    const people = (meta?.people || []).map(p => ({
+        Name: p.name,
+        Id: generateItemId(p.name),
+        Role: p.role || "",
+        Type: p.type || "Actor",
+    }));
+
+    const studios = (meta?.studios || []).map(s => ({
+        Name: s.name,
+        Id: generateItemId(s.name),
+    }));
+
     return {
-        Name: meta?.enriched_name || meta?.name || ep.showName,
+        Name: meta?.name || ep.showName,
+        OriginalTitle: meta?.original_title || undefined,
         ServerId: serverId,
         Id: sid,
-        SortName: (meta?.enriched_name || meta?.name || ep.showName).toLowerCase(),
-        Path: `media/shows/${ep.showName}`,
+        SortName: (meta?.name || ep.showName).toLowerCase(),
         Overview: meta?.overview || undefined,
+        PremiereDate: meta?.premiere_date || undefined,
+        EndDate: meta?.end_date || undefined,
+        OfficialRating: meta?.official_rating || undefined,
+        CommunityRating: meta?.community_rating || null,
         ProductionYear: meta?.year || undefined,
-        Genres: meta?.genre || [],
+        Status: meta?.status || undefined,
+        Genres: genres,
+        GenreItems: genreItems,
+        Taglines: meta?.taglines || [],
+        Tags: meta?.tags || [],
+        ExternalUrls: meta?.external_urls || [],
+        ProviderIds: meta?.provider_ids || {},
+        RemoteTrailers: meta?.trailers || [],
+        People: people,
+        Studios: studios,
+        ChildCount: meta?.child_count || 0,
+        RecursiveItemCount: meta?.episode_count || 0,
         ChannelId: null,
+        EnableMediaSourceDisplay: true,
         IsFolder: true,
         Type: "Series",
         CollectionType: "tvshows",
+        PlayAccess: "Full",
         UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(sid), ItemId: sid },
-        ImageTags: poster ? { Primary: poster.tag } : {},
-        BackdropImageTags: [],
-        ImageBlurHashes: poster ? { Primary: {} } : {},
+        ImageTags: imgTags,
+        BackdropImageTags: backdrop ? [backdrop.tag] : [],
+        ImageBlurHashes: {},
         LocationType: "FileSystem",
+        MediaType: "Unknown",
     };
 }
 
-function makeSeasonFolder(ep, serverId) {
+export function makeSeasonFolder(ep, serverId) {
     const sid = generateItemId(`${ep.showName}-s${ep.season}`);
     const poster = findPosterInDir(`media/shows/${ep.showName}`);
     return {
@@ -355,6 +442,6 @@ function generateItemId(input) {
     return Math.abs(hash).toString(16).padStart(32, "0").slice(0, 32);
 }
 
-function addDashesToUuid(hex) {
+export function addDashesToUuid(hex) {
     return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
 }

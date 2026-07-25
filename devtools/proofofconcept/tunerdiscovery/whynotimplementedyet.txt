@@ -1,0 +1,3 @@
+The protocol is terrible. It doesn't even provide the direct m3u. Besides, I have no idea about satellite TV.
+I'm going to put this on the back burner for now and work on it later.
+I haven't taken a look at Home Runner yet, but I'm working on something else for the time being.

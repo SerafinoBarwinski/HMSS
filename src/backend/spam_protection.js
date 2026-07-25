@@ -11,9 +11,15 @@ export function spamProtection({ windowMs = 60000, maxRequests = 100 } = {}) {
     }, windowMs).unref();
 
     return (req, res, next) => {
-        const ip = req.ip || req.socket.remoteAddress || "unknown";
+        const ip = req.headers["cf-connecting-ip"] || req.ip || req.socket.remoteAddress || "unknown";
 
         if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1") {
+            return next();
+        }
+
+        // skip private/Docker/LAN IPs (also IPv4-mapped IPv6)
+        const stripV6 = ip.replace(/^::ffff:/, "");
+        if (/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.)/.test(stripV6)) {
             return next();
         }
 

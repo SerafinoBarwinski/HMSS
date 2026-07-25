@@ -290,34 +290,9 @@ export function hmssAuthRoutes(app, getDb) {
         const p = u.perms;
         const isAdmin = p >= 2;
         const isRoot = p >= 3;
-        return {
-            Name: u.name,
-            ServerId: serverId || "hmss-local",
-            Id: u.uuid || u.id || "",
-            HasPassword: true,
-            HasConfiguredPassword: true,
-            HasConfiguredEasyPassword: false,
-            EnableAutoLogin: false,
-            LastActivityDate: new Date().toISOString(),
-            PrimaryImageTag: u.logo_path ? hashLogoPath(u.logo_path) : null,
-            Configuration: {
-                PlayDefaultAudioTrack: true,
-                SubtitleLanguagePreference: "",
-                DisplayMissingEpisodes: false,
-                GroupedFolders: [],
-                SubtitleMode: "Default",
-                DisplayCollectionsView: false,
-                EnableLocalPassword: false,
-                OrderedViews: [],
-                LatestItemsExcludes: [],
-                MyMediaExcludes: [],
-                HidePlayedInLatest: true,
-                RememberAudioSelections: true,
-                RememberSubtitleSelections: true,
-                EnableNextEpisodeAutoPlay: true,
-                CastReceiverId: null,
-            },
-            Policy: {
+        let storedPolicy = null;
+        try { if (u.policy_json) storedPolicy = JSON.parse(u.policy_json); } catch {}
+        const defaultPolicy = {
                 IsAdministrator: isAdmin,
                 IsHidden: isRoot,
                 EnableCollectionManagement: false,
@@ -360,7 +335,35 @@ export function hmssAuthRoutes(app, getDb) {
                 AuthenticationProviderId: "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
                 PasswordResetProviderId: "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
                 SyncPlayAccess: "CreateAndJoinGroups",
+        };
+        return {
+            Name: u.name,
+            ServerId: serverId || "hmss-local",
+            Id: (u.uuid || "").replace(/-/g, ""),
+            HasPassword: true,
+            HasConfiguredPassword: true,
+            HasConfiguredEasyPassword: false,
+            EnableAutoLogin: false,
+            LastActivityDate: new Date().toISOString(),
+            PrimaryImageTag: u.logo_path ? hashLogoPath(u.logo_path) : null,
+            Configuration: {
+                PlayDefaultAudioTrack: true,
+                SubtitleLanguagePreference: "",
+                DisplayMissingEpisodes: false,
+                GroupedFolders: [],
+                SubtitleMode: "Default",
+                DisplayCollectionsView: false,
+                EnableLocalPassword: false,
+                OrderedViews: [],
+                LatestItemsExcludes: [],
+                MyMediaExcludes: [],
+                HidePlayedInLatest: true,
+                RememberAudioSelections: true,
+                RememberSubtitleSelections: true,
+                EnableNextEpisodeAutoPlay: true,
+                CastReceiverId: null,
             },
+            Policy: storedPolicy ? { ...defaultPolicy, ...storedPolicy } : defaultPolicy,
         };
     }
 
@@ -384,8 +387,10 @@ export function hmssAuthRoutes(app, getDb) {
         const db = getDb();
         const sys = sql.getSystemInfo(db);
         const userId = req.params.userId;
+        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
 
         let user = db.prepare("SELECT * FROM users WHERE uuid = ?").get(userId);
+        if (!user) user = db.prepare("SELECT * FROM users WHERE uuid = ?").get(withDashes);
         if (!user) user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
 
@@ -435,7 +440,8 @@ export function hmssAuthRoutes(app, getDb) {
 
             try {
                 const db = getDb();
-                const resolved = db.prepare("SELECT id, logo_path FROM users WHERE uuid = ? OR id = ?").get(userId, userId);
+                const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
+                const resolved = db.prepare("SELECT id, logo_path FROM users WHERE uuid = ? OR uuid = ? OR id = ?").get(userId, withDashes, userId);
                 const realId = resolved ? resolved.id : null;
                 if (!realId) return res.status(404).end();
 
@@ -485,15 +491,25 @@ export function hmssAuthRoutes(app, getDb) {
         serveUserImage(req, res, getDb());
     });
 
+    app.get("/Users/:userId/Images/Primary", (req, res) => {
+        serveUserImage({ params: { userId: req.params.userId }, ...req }, res, getDb());
+    });
+
     app.head("/UserImage", (req, res) => {
         serveUserImage(req, res, getDb(), true);
+    });
+
+    app.head("/Users/:userId/Images/Primary", (req, res) => {
+        serveUserImage({ params: { userId: req.params.userId }, ...req }, res, getDb(), true);
     });
 
     function serveUserImage(req, res, db, headOnly = false) {
         const userId = req.params.userId || req.query.userId || req.user?.id;
         if (!userId) return res.status(401).end();
 
+        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
         let user = db.prepare("SELECT logo_path FROM users WHERE uuid = ?").get(userId);
+        if (!user) user = db.prepare("SELECT logo_path FROM users WHERE uuid = ?").get(withDashes);
         if (!user) user = db.prepare("SELECT logo_path FROM users WHERE id = ?").get(userId);
         if (!user || !user.logo_path) return res.status(404).end();
 

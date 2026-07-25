@@ -13,9 +13,9 @@ const SETTINGS_PATH = path.resolve(__dirname, "../telerising/settings.json");
 const CONFIG_FILES_DIR = path.resolve(__dirname, "../telerising/app/static/config_files");
 
 let telerisingProcess = null;
-let telerisingPort = 5000;
+export let telerisingPort = 5000;
 
-function getLocalIp() {
+export function getLocalIp() {
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
         for (const iface of interfaces[name]) {
@@ -25,7 +25,7 @@ function getLocalIp() {
     return "localhost";
 }
 
-export function killTelerisingProcess() {
+export function killProcess() {
     if (telerisingProcess && !telerisingProcess.killed) {
         telerisingProcess.kill("SIGTERM");
     }
@@ -374,4 +374,10 @@ export function startTelerisingIfAutostart(db) {
         console.log("Telerising process exited with code " + code);
         telerisingProcess = null;
     });
+}
+
+export function listActiveProvider() {
+    if (!telerisingProcess || telerisingProcess.killed) return {};
+    const settings = readSettings();
+    return settings?.accounts || {};
 }

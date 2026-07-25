@@ -1,0 +1,8 @@
+name: Crunchyroll
+version: "1.0"
+description: "Anime detection + artwork provider using Crunchyroll's public CDN image server."
+capabilities:
+  - anime-artwork
+  - anime-meta
+mediaTypes:
+  - show

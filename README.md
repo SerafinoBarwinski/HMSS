@@ -7,12 +7,7 @@ Can also be faster since Express is well optimized.
 **Status: Alpha.** Core functionality works — authentication, media browsing,
 metadata enrichment, artwork, and streaming all operational. More features
 coming steadily. Contributions and feedback welcome.
-
-
-
 *There are also pictures and a video at the very bottom.*
-
-
 
 ## Why?
 
@@ -57,32 +52,15 @@ connect with Findroid / Jellyfin Mobile.
 On first start, the Setup Wizard guides you through creating the admin account
 and configuring server settings.
 
-## Addon Configuration
-
-API keys for metadata and artwork are configured through addon override files.
-Each addon in `src/addons/` has a `config.json` (schema + defaults) and an
-`override.json.example` (copy to `override.json` and fill in your keys).
-
-You can also configure addons directly through the **Jellyfin Web Dashboard**:
-go to **Dashboard → Plugins**, click on an addon, edit its settings, and save.
-
-**TMDB** (metadata for movies and shows):
-```
-src/addons/tmdb/override.json
-```
-```json
-{ "api_key": "your-tmdb-api-key" }
-```
-
-**Fanart.tv** (posters, backgrounds, logos):
-```
-src/addons/fanart_tv/override.json
-```
-```json
-{ "api_key": "your-fanart-tv-key" }
-```
-
-**MusicBrainz** works out of the box — no API key needed.
+## Addons
+I am implementing my own add-on system.
+Four modules are included out of the box:
+- TMDB: Metadata
+  *Needs Config*
+- Musicbrainz: Music Metadata
+  *Needs Config*
+- fanart.tv: Artwork
+- Crunchyroll: Artwork
 
 ## Media Setup
 
@@ -119,8 +97,14 @@ and posters from TMDB and Fanart.tv.
 
 - Adding remaning APIs
 - Adding remaning API features
+- Tuner discovery
 - HMSS-native frontend
 - XMLTV / EPG guide data
+
+## How *you* could help me
+I would be happy if you contributed to the project.
+Can you design a logo or give me some feedback?
+An XML file from an SDDP would also be helpful!
 
 ## API Compatibility
 
