@@ -355,8 +355,8 @@ export function makeShowFolder(ep, serverId) {
         Id: sid,
         SortName: (meta?.name || ep.showName).toLowerCase(),
         Overview: meta?.overview || undefined,
-        PremiereDate: normalizeIsoDate(meta?.premiere_date),
-        EndDate: normalizeIsoDate(meta?.end_date),
+        PremiereDate: meta?.premiere_date || undefined,
+        EndDate: meta?.end_date || undefined,
         OfficialRating: meta?.official_rating || undefined,
         CommunityRating: meta?.community_rating || null,
         ProductionYear: meta?.year || undefined,
@@ -440,13 +440,6 @@ function generateItemId(input) {
         hash |= 0;
     }
     return Math.abs(hash).toString(16).padStart(32, "0").slice(0, 32);
-}
-
-export function normalizeIsoDate(d) {
-    if (!d || typeof d !== "string") return d || undefined;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d + "T00:00:00.0000000Z";
-    if (/^\d{4}-\d{2}-\d{2}T/.test(d) && !d.endsWith("Z") && d.length < 25) return d + ".0000000Z";
-    return d;
 }
 
 export function addDashesToUuid(hex) {
