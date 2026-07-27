@@ -7,7 +7,6 @@ Can also be faster since Express is well optimized.
 **Status: Alpha.** Core functionality works — authentication, media browsing,
 metadata enrichment, artwork, and streaming all operational. More features
 coming steadily. Contributions and feedback welcome.
-[*There are also pictures and a video at the very bottom.*]: #
 
 ## Why?
 
@@ -54,11 +53,11 @@ and configuring server settings.
 
 ## Override Arguments
 
-# Common
+#### Common
 - --debug: *Ensure there is more logging.*
 - --port: *Changes the Web Server Port*
 
-# Made for Devs:
+#### Made for Devs:
 - --fail-integrity-check: *Causes the integrity check to fail, even if all conditions are met. May be useful for debugging the integrity check.*
 - --skip-integrity-check: *Ensures the integrity check succeeds, even if not all conditions are met. **This can lead to unpredictable errors!***
 - --i-am-a-tea-pot: *No Coffee for you*
