@@ -36,6 +36,19 @@ export async function init(rootPsw, db, argon2) {
             "startup_wizard_completed" BOOLEAN not null default false,
             "config_json" TEXT default '{}'
         );
+
+        create table if not exists "user_data" (
+            "user_id" INTEGER not null,
+            "item_id" TEXT not null,
+            "playback_position_ticks" INTEGER not null default 0,
+            "play_count" INTEGER not null default 0,
+            "is_favorite" BOOLEAN not null default false,
+            "played" BOOLEAN not null default false,
+            "last_played_date" TEXT,
+            "played_percentage" REAL not null default 0,
+            PRIMARY KEY (user_id, item_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
     `); // PERMS: 0 - 3; where 3 is root and 2 admin. 1 manager and 0 visitor
 
     // add uuid column to existing tables (harmless if already exists)
@@ -319,4 +332,67 @@ export function logoutToken(token, db) {
 
 export function getSystemInfo(db) {
     return db.prepare("SELECT * FROM system").get();
+}
+
+export function getUserData(db, userId, itemId) {
+    const row = db.prepare("SELECT * FROM user_data WHERE user_id = ? AND item_id = ?").get(userId, itemId);
+    if (!row) {
+        return {
+            PlaybackPositionTicks: 0,
+            PlayCount: 0,
+            IsFavorite: false,
+            Played: false,
+            PlayedPercentage: 0,
+            LastPlayedDate: null,
+        };
+    }
+    return {
+        PlaybackPositionTicks: row.playback_position_ticks,
+        PlayCount: row.play_count,
+        IsFavorite: Boolean(row.is_favorite),
+        Played: Boolean(row.played),
+        PlayedPercentage: row.played_percentage,
+        LastPlayedDate: row.last_played_date,
+    };
+}
+
+export function setUserData(db, userId, itemId, data) {
+    const existing = db.prepare("SELECT * FROM user_data WHERE user_id = ? AND item_id = ?").get(userId, itemId);
+    const pos = data.PlaybackPositionTicks ?? existing?.playback_position_ticks ?? 0;
+    const count = data.PlayCount ?? existing?.play_count ?? 0;
+    const fav = data.IsFavorite ?? existing?.is_favorite ?? false;
+    const played = data.Played ?? existing?.played ?? false;
+    const pct = data.PlayedPercentage ?? existing?.played_percentage ?? 0;
+    const lastDate = data.LastPlayedDate ?? existing?.last_played_date ?? null;
+
+    if (existing) {
+        db.prepare(`UPDATE user_data SET playback_position_ticks = ?, play_count = ?, is_favorite = ?, played = ?, played_percentage = ?, last_played_date = ? WHERE user_id = ? AND item_id = ?`)
+            .run(pos, count, fav ? 1 : 0, played ? 1 : 0, pct, lastDate, userId, itemId);
+    } else {
+        db.prepare(`INSERT INTO user_data (user_id, item_id, playback_position_ticks, play_count, is_favorite, played, played_percentage, last_played_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(userId, itemId, pos, count, fav ? 1 : 0, played ? 1 : 0, pct, lastDate);
+    }
+}
+
+export function getResumableItems(db, userId, mediaTypes, limit) {
+    const rows = db.prepare(`
+        SELECT * FROM user_data
+        WHERE user_id = ?
+          AND playback_position_ticks > 0
+          AND (played = 0 OR played IS NULL)
+        ORDER BY last_played_date DESC
+        LIMIT ?
+    `).all(userId, limit || 12);
+    return rows;
+}
+
+export function getPlayedItems(db, userId, limit) {
+    const rows = db.prepare(`
+        SELECT * FROM user_data
+        WHERE user_id = ?
+          AND played = 1
+        ORDER BY last_played_date DESC
+        LIMIT ?
+    `).all(userId, limit || 12);
+    return rows;
 }

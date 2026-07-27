@@ -25,7 +25,6 @@ console.log("=".repeat(50))
 console.log("The server is starting up...");
 
 // --- Vars
-
 var port = 8000
 var mediaDirs = {
     movie: ["./media/movie"],
@@ -36,11 +35,51 @@ var mediaDirs = {
 var ffmpeg_bin = "/bin/ffmpeg" //Fallback FFMPEG Path Arg
 var JPI_Version = "10.11.11" //Jellyfin API Version
 
+var DEBUG_LOG_EVERY_REQUEST = true
+var DEBUG_LOG_EVERY_WEBSCKT = false;
+var DEBUG_fail_integrity_check = false;
+var DEBUG_skip_integrity_check = false;
+var DEBUG_TEA_POT = false;
 
-// Todo: Add Args instead of Vars!
-const DEBUG_LOG_EVERY_REQUEST = true
-const DEBUG_LOG_EVERY_WEBSCKT = false;
-const DEBUG_fail_integrity_check = false;
+var is_server_ready = false;
+
+const args = process.argv.slice(2);
+
+for (const arg of args) {
+    switch (arg) {
+        case "--port":
+            port = parseInt(process.argv[3]) || port;
+            break;
+        case "--ffmpeg-bin":
+            ffmpeg_bin = process.argv[3] || ffmpeg_bin;
+            if (!process.argv[3].includes("/") && !process.argv[3].includes("\\")) {
+                console.error("Invalid FFMPEG binary path. Defaulting to /bin/ffmpeg");
+                ffmpeg_bin = "/bin/ffmpeg";
+            }
+            if (!fs.existsSync(ffmpeg_bin)) {
+                console.error("FFMPEG binary not found at specified path:", ffmpeg_bin, ". Defaulting to /bin/ffmpeg");
+                ffmpeg_bin = "/bin/ffmpeg";
+            }
+            break;
+        case "--debug":
+            console.log("Debug-Mode active");
+            DEBUG_LOG_EVERY_REQUEST = true;
+            DEBUG_LOG_EVERY_WEBSCKT = true;
+            break;
+        case "--fail-integrity-check":
+            DEBUG_fail_integrity_check = true;
+            break;
+        case "--skip-integrity-check":
+            DEBUG_skip_integrity_check = true;
+            break;
+        case "--i-am-a-tea-pot":
+            console.error("☕️ I'm a teapot! (418)");
+            DEBUG_TEA_POT = true;
+            break;
+        default:
+            console.log(`Unknown argument(s): ${arg}`);
+    }
+}
 
 // -----
 const db = new Database("sql.db");
@@ -50,7 +89,8 @@ if (!init.succes) {
     exit(1)
 }
 
-const integrityCheck = await integrity.check(DEBUG_fail_integrity_check, db, port, ffmpeg_bin, mediaDirs);
+// Check integrity of the database and media files, except if the user has explicitly requested to skip the check.
+const integrityCheck = DEBUG_skip_integrity_check ? { success: true } : await integrity.check(DEBUG_fail_integrity_check, db, port, ffmpeg_bin, mediaDirs);
 if (!integrityCheck.success) {
     console.warn("Integrity check failed:");
     integrityCheck.reasons.forEach(element => {
@@ -99,10 +139,41 @@ app.use((req, res, next) => {
     next();
 });
 app.use((req, res, next) => {
+
+    // Very important!
+    if (DEBUG_TEA_POT) {
+        switch (req.get("Content-Type")) {
+            case "application/json":
+                res.status(418).json({ error: "☕️ I'm a teapot" });
+                return;
+            case "text/html":
+                res.status(418).send("<h1>☕️ I'm a teapot</h1>");
+                return;
+            default:
+                res.status(418).send("☕️ I'm a teapot");
+                return;
+        }
+    }
+
+    if (!is_server_ready) {
+        res.status(425).send("Server is starting up, please wait a moment...\nGo watch some Anime or something while you wait. :)");
+        return;
+    }
+
+    // Enforce HTTP/1.1 or higher
+    const major = req.httpVersionMajor;
+    if (major < 1 || (major === 1 && req.httpVersionMinor < 1)) {
+        return res.status(505).send("HTTP Version Not Supported");
+    }
+
+    // CORS headers
     res.set("Access-Control-Allow-Origin", "*");
     res.set("Access-Control-Allow-Headers", "*");
     res.set("Access-Control-Allow-Methods", "*");
+
+    // Handle preflight requests
     if (req.method === "OPTIONS") return res.status(204).end();
+
     next();
 });
 
@@ -132,18 +203,19 @@ await webserver.addonRoutes(app)
 telerisingRoutes(app, getDb, port)
 app.use("/web", express.static("web"));
 
-
-try {
-    const mediaIndex = await StartMediaIndex();
-    globalThis.__mediaIndex = mediaIndex;
-} catch (err) {
-    console.error("Media-Index could not been created:", err);
-}
-
 const server = app.listen(port, "0.0.0.0", async () => {
     console.log(`HMSS listening on port ${port}`);
-
+    
     startTelerisingIfAutostart(db);
+
+    try {
+        const mediaIndex = await StartMediaIndex();
+        globalThis.__mediaIndex = mediaIndex;
+    } catch (err) {
+        console.error("Media-Index could not been created:", err);
+    }
+
+    is_server_ready = true;
 });
 
 const wss = new WebSocketServer({ server, path: "/socket" });

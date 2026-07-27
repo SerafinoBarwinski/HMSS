@@ -1,6 +1,6 @@
 import { getAddons, getAddonsByCapability, searchAll } from "./addon_loader.js";
 import { authMiddleware, hmssAuthRoutes } from "./auth.js";
-import { getSystemInfo } from "./sql.js";
+import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems } from "./sql.js";
 import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { getItemMeta } from "./meta_reader.js";
@@ -749,8 +749,49 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.json(result);
     });
 
-    app.get("/Users/:userId/Items/Resume", (req, res) => {
-        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    app.get("/Users/:userId/Items/Resume", async (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const sys = getSystemInfo(db);
+        const serverId = sys?.id || "hmss-local";
+        const userId = req.user.id;
+        const limit = parseInt(req.query.Limit || req.query.limit) || 12;
+        const includeItemTypes = (req.query.IncludeItemTypes || req.query.includeItemTypes || "Episode,Movie").split(",").map(t => t.trim());
+        const rows = getResumableItems(db, userId, "Video", limit * 3);
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
+        const items = [];
+        for (const row of rows) {
+            if (items.length >= limit) break;
+            let match = null;
+            let entryType = null;
+            let jellyfinType = null;
+            for (const m of index.movies || []) {
+                if (generateItemId(m.id || m.filePath) === row.item_id) { match = m; entryType = "movie"; jellyfinType = "Movie"; break; }
+            }
+            if (!match) {
+                for (const ep of index.shows || []) {
+                    if (generateItemId(ep.id || ep.filePath) === row.item_id) { match = ep; entryType = "show"; jellyfinType = "Episode"; break; }
+                }
+            }
+            if (!match || !includeItemTypes.includes(jellyfinType)) continue;
+            const item = mapToJellyfinItem({
+                id: match.id, title: match.title, showName: match.showName,
+                season: match.season, episode: match.episode, year: match.year,
+                filePath: match.filePath, overview: match.overview,
+                duration: match.duration, genres: match.genres,
+            }, entryType, serverId);
+            item.UserData = {
+                PlaybackPositionTicks: row.playback_position_ticks,
+                PlayCount: row.play_count,
+                IsFavorite: Boolean(row.is_favorite),
+                Played: Boolean(row.played),
+                LastPlayedDate: row.last_played_date || undefined,
+                Key: item.UserData.Key,
+                ItemId: item.Id,
+            };
+            items.push(item);
+        }
+        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
     app.get("/Users/:userId/Items/Latest", (req, res) => {
@@ -2025,8 +2066,49 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.get('/Movies/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.get('/Shows/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.get('/Trailers/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
-    app.get('/UserItems/Resume', (req, res) => {
-        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+    app.get('/UserItems/Resume', async (req, res) => {
+        if (!req.user) return res.status(200).json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+        const db = getDb();
+        const sys = getSystemInfo(db);
+        const serverId = sys?.id || "hmss-local";
+        const userId = req.user.id;
+        const limit = parseInt(req.query.Limit || req.query.limit) || 12;
+        const includeItemTypes = (req.query.IncludeItemTypes || req.query.includeItemTypes || "Episode,Movie").split(",").map(t => t.trim());
+        const rows = getResumableItems(db, userId, "Video", limit * 3);
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
+        const items = [];
+        for (const row of rows) {
+            if (items.length >= limit) break;
+            let match = null;
+            let entryType = null;
+            let jellyfinType = null;
+            for (const m of index.movies || []) {
+                if (generateItemId(m.id || m.filePath) === row.item_id) { match = m; entryType = "movie"; jellyfinType = "Movie"; break; }
+            }
+            if (!match) {
+                for (const ep of index.shows || []) {
+                    if (generateItemId(ep.id || ep.filePath) === row.item_id) { match = ep; entryType = "show"; jellyfinType = "Episode"; break; }
+                }
+            }
+            if (!match || !includeItemTypes.includes(jellyfinType)) continue;
+            const item = mapToJellyfinItem({
+                id: match.id, title: match.title, showName: match.showName,
+                season: match.season, episode: match.episode, year: match.year,
+                filePath: match.filePath, overview: match.overview,
+                duration: match.duration, genres: match.genres,
+            }, entryType, serverId);
+            item.UserData = {
+                PlaybackPositionTicks: row.playback_position_ticks,
+                PlayCount: row.play_count,
+                IsFavorite: Boolean(row.is_favorite),
+                Played: Boolean(row.played),
+                LastPlayedDate: row.last_played_date || undefined,
+                Key: item.UserData.Key,
+                ItemId: item.Id,
+            };
+            items.push(item);
+        }
+        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
     // === LibraryStructure ===
@@ -2734,10 +2816,59 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     // === Session ===
     app.post('/Sessions/Capabilities', (req, res) => { /* PostCapabilities */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Sessions/Capabilities/Full', (req, res) => { /* PostFullCapabilities */ res.status(204) });
-    app.post('/Sessions/Playing', (req, res) => { /* ReportPlaybackStart */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Sessions/Playing/Ping', (req, res) => { /* PingPlaybackSession */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Sessions/Playing/Progress', (req, res) => { /* ReportPlaybackProgress */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/Sessions/Playing/Stopped', (req, res) => { /* ReportPlaybackStopped */ res.status(200).json({ message: 'Not implemented' }); });
+    app.post('/Sessions/Playing', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const body = req.body || {};
+        const itemId = body.ItemId;
+        if (itemId) {
+            const db = getDb();
+            const existing = getUserData(db, req.user.id, itemId);
+            setUserData(db, req.user.id, itemId, {
+                PlaybackPositionTicks: body.PositionTicks || existing.PlaybackPositionTicks || 0,
+                LastPlayedDate: new Date().toISOString(),
+            });
+        }
+        res.status(200).end();
+    });
+    app.post('/Sessions/Playing/Ping', (req, res) => { res.status(200).end(); });
+    app.post('/Sessions/Playing/Progress', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const body = req.body || {};
+        const itemId = body.ItemId;
+        if (itemId) {
+            const db = getDb();
+            const posTicks = body.PositionTicks || 0;
+            const runtimeTicks = body.RunTimeTicks || 0;
+            const pct = runtimeTicks > 0 ? Math.min((posTicks / runtimeTicks) * 100, 100) : 0;
+            setUserData(db, req.user.id, itemId, {
+                PlaybackPositionTicks: posTicks,
+                PlayedPercentage: pct,
+                LastPlayedDate: new Date().toISOString(),
+            });
+        }
+        res.status(200).end();
+    });
+    app.post('/Sessions/Playing/Stopped', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const body = req.body || {};
+        const itemId = body.ItemId;
+        if (itemId) {
+            const db = getDb();
+            const posTicks = body.PositionTicks || 0;
+            const runtimeTicks = body.RunTimeTicks || 0;
+            const pct = runtimeTicks > 0 ? Math.min((posTicks / runtimeTicks) * 100, 100) : 0;
+            const isFinished = pct >= 95;
+            const existing = getUserData(db, req.user.id, itemId);
+            setUserData(db, req.user.id, itemId, {
+                PlaybackPositionTicks: isFinished ? 0 : posTicks,
+                Played: isFinished,
+                PlayedPercentage: isFinished ? 100 : pct,
+                PlayCount: isFinished ? (existing.PlayCount || 0) + 1 : existing.PlayCount || 0,
+                LastPlayedDate: new Date().toISOString(),
+            });
+        }
+        res.status(200).end();
+    });
     app.post('/Sessions/Viewing', (req, res) => { /* ReportViewing */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Sessions/:sessionId/Command', (req, res) => { /* SendFullGeneralCommand */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Sessions/:sessionId/Command/:command', (req, res) => { /* SendGeneralCommand */ res.status(200).json({ message: 'Not implemented' }); });
@@ -3084,14 +3215,56 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     });
 
     // === UserData ===
-    app.delete('/UserFavoriteItems/:itemId', (req, res) => { /* UnmarkFavoriteItem */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/UserFavoriteItems/:itemId', (req, res) => { /* MarkFavoriteItem */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/UserItems/:itemId/Rating', (req, res) => { /* DeleteUserItemRating */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/UserItems/:itemId/Rating', (req, res) => { /* UpdateUserItemRating */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/UserItems/:itemId/UserData', (req, res) => { /* GetItemUserData */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/UserItems/:itemId/UserData', (req, res) => { /* UpdateItemUserData */ res.status(200).json({ message: 'Not implemented' }); });
-    app.delete('/UserPlayedItems/:itemId', (req, res) => { /* MarkUnplayedItem */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/UserPlayedItems/:itemId', (req, res) => { /* MarkPlayedItem */ res.status(200).json({ message: 'Not implemented' }); });
+    app.delete('/UserFavoriteItems/:itemId', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const db = getDb();
+        const existing = getUserData(db, req.user.id, req.params.itemId);
+        setUserData(db, req.user.id, req.params.itemId, { IsFavorite: false });
+        res.status(200).end();
+    });
+    app.post('/UserFavoriteItems/:itemId', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const db = getDb();
+        setUserData(db, req.user.id, req.params.itemId, { IsFavorite: true });
+        res.status(200).end();
+    });
+    app.delete('/UserItems/:itemId/Rating', (req, res) => { res.status(200).end(); });
+    app.post('/UserItems/:itemId/Rating', (req, res) => { res.status(200).end(); });
+    app.get('/UserItems/:itemId/UserData', (req, res) => {
+        if (!req.user) return res.status(200).json({ PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false });
+        const db = getDb();
+        const data = getUserData(db, req.user.id, req.params.itemId);
+        res.json(data);
+    });
+    app.post('/UserItems/:itemId/UserData', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const db = getDb();
+        setUserData(db, req.user.id, req.params.itemId, req.body || {});
+        res.status(200).end();
+    });
+    app.delete('/UserPlayedItems/:itemId', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const db = getDb();
+        setUserData(db, req.user.id, req.params.itemId, {
+            Played: false,
+            PlaybackPositionTicks: 0,
+            PlayedPercentage: 0,
+        });
+        res.status(200).end();
+    });
+    app.post('/UserPlayedItems/:itemId', (req, res) => {
+        if (!req.user) return res.status(200).end();
+        const db = getDb();
+        const existing = getUserData(db, req.user.id, req.params.itemId);
+        setUserData(db, req.user.id, req.params.itemId, {
+            Played: true,
+            PlaybackPositionTicks: 0,
+            PlayedPercentage: 100,
+            PlayCount: (existing.PlayCount || 0) + 1,
+            LastPlayedDate: new Date().toISOString(),
+        });
+        res.status(200).end();
+    });
 
     // === UserView ===
     app.get('/UserViews/GroupingOptions', (req, res) => { /* GetGroupingOptions */ res.status(200).json({ message: 'Not implemented' }); });

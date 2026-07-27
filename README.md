@@ -52,6 +52,17 @@ connect with  Jellyfin Mobile / Findroid.
 On first start, the Setup Wizard guides you through creating the admin account
 and configuring server settings.
 
+## Override Arguments
+
+# Common
+- --debug: *Ensure there is more logging.*
+- --port: *Changes the Web Server Port*
+
+# Made for Devs:
+- --fail-integrity-check: *Causes the integrity check to fail, even if all conditions are met. May be useful for debugging the integrity check.*
+- --skip-integrity-check: *Ensures the integrity check succeeds, even if not all conditions are met. **This can lead to unpredictable errors!***
+- --i-am-a-tea-pot: *No Coffee for you*
+
 ## Addons
 I am implementing my own add-on system.
 Four modules are included out of the box:
