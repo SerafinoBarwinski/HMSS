@@ -6,6 +6,10 @@ import { probeMedia, generateItemId } from "./media_probe.js";
 import { getItemMeta } from "./meta_reader.js";
 import { readFile, writeFile } from "node:fs/promises";
 import * as telerising from "./telerising.js";
+import * as codecs from "./codecs.js";
+import * as transcoder from "./transcoder.js";
+import * as server from "../../server.js";
+
 import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream } from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -14,7 +18,6 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { imageSize } from "image-size";
 import { fileURLToPath } from "node:url";
-import * as server from "../../server.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1488,6 +1491,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             SupportsDirectPlay: true,
             DirectPlayUrl: `/Videos/${id}/stream?static=true&api_key=`,
             DirectStreamUrl: `/Videos/${id}/stream`,
+            TranscodingUrl: `/Videos/${id}/hls/master.m3u8`,
+            HlsUrl: `/Videos/${id}/hls/master.m3u8`,
             VideoType: isVideoItem ? "VideoFile" : undefined,
             MediaStreams: probe.streams,
             Bitrate: probe.bitrate,
@@ -2442,9 +2447,10 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         return { found, itemPath, itemType, probe };
     }
 
-    function buildMediaSource(found, itemPath, id, probe, itemType) {
+    function buildMediaSource(found, itemPath, id, probe, itemType, disableDirectPlay = false) {
         if (!probe) return null;
         const isVideo = itemType === "Episode" || itemType === "Movie" || itemType === "Video";
+        const transcodeUrl = `/Videos/${id}/hls/master.m3u8`;
         return {
             Protocol: "File",
             Id: id,
@@ -2457,10 +2463,12 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
             IsRemote: false,
             RunTimeTicks: Math.round(probe.duration * 10000000),
             SupportsTranscoding: true,
-            SupportsDirectStream: true,
-            SupportsDirectPlay: true,
-            DirectPlayUrl: `/Videos/${id}/stream?static=true&api_key=`,
-            DirectStreamUrl: `/Videos/${id}/stream`,
+            SupportsDirectStream: !disableDirectPlay,
+            SupportsDirectPlay: !disableDirectPlay,
+            DirectPlayUrl: disableDirectPlay ? null : `/Videos/${id}/stream?static=true&api_key=`,
+            DirectStreamUrl: disableDirectPlay ? null : `/Videos/${id}/stream`,
+            TranscodingUrl: transcodeUrl,
+            HlsUrl: transcodeUrl,
             VideoType: isVideo ? "VideoFile" : undefined,
             MediaStreams: probe.streams,
             Bitrate: probe.bitrate,
@@ -2580,6 +2588,28 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         };
     }
 
+    function clientCanDirectPlay(deviceProfile, sourceStreams) {
+        if (!deviceProfile?.DirectPlayProfiles?.length) return true;
+        const videoStream = sourceStreams.find(s => s.Type === "Video");
+        const audioStream = sourceStreams.find(s => s.Type === "Audio");
+        const srcVideoCodec = (videoStream?.Codec || "").toLowerCase();
+        const srcAudioCodec = (audioStream?.Codec || "").toLowerCase();
+        const isVideo = !!videoStream;
+        for (const profile of deviceProfile.DirectPlayProfiles) {
+            if (isVideo && profile.Type !== "Video") continue;
+            if (!isVideo && profile.Type !== "Audio") continue;
+            const videoCodecs = (profile.VideoCodec || "").split(",").map(c => c.trim().toLowerCase()).filter(Boolean);
+            const audioCodecs = (profile.AudioCodec || "").split(",").map(c => c.trim().toLowerCase()).filter(Boolean);
+            if (isVideo) {
+                if (!videoCodecs.length) continue;
+                if (srcVideoCodec && !videoCodecs.some(vc => srcVideoCodec.includes(vc))) continue;
+            }
+            if (audioCodecs.length && srcAudioCodec && !audioCodecs.some(ac => srcAudioCodec.includes(ac))) continue;
+            return true;
+        }
+        return false;
+    }
+
     app.get('/Items/:itemId/PlaybackInfo', async (req, res) => {
         const item = await findItemForPlayback(req);
         if (!item) return res.status(404).json({ error: "Item not found." });
@@ -2598,7 +2628,12 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
             return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel)));
         }
         const id = generateItemId(item.found.id || item.found.filePath);
-        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType);
+        const deviceProfile = req.body?.DeviceProfile || null;
+        let disableDirectPlay = false;
+        if (deviceProfile && item.probe?.streams?.length) {
+            disableDirectPlay = !clientCanDirectPlay(deviceProfile, item.probe.streams);
+        }
+        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, disableDirectPlay);
         res.json(buildPlaybackInfoResponse(mediaSource));
     });
     app.post('/LiveStreams/Close', (req, res) => { /* CloseLiveStream */ res.status(200).json({ message: 'Not implemented' }); });
@@ -3070,6 +3105,75 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.get('/Videos/:itemId/stream', (req, res) => streamFile(req, res, req.params.itemId));
     app.head('/Videos/:itemId/stream', (req, res) => streamFile(req, res, req.params.itemId));
     app.get('/Videos/:videoId/:mediaSourceId/Attachments/:index', (req, res) => { /* GetAttachment */ res.status(200).json({ message: 'Not implemented' }); });
+
+    // === HLS Transcoding ===
+    const hlsSessions = new Map();
+
+    async function startHlsTranscode(itemId) {
+        const rawId = (itemId || "").replace(/-/g, "");
+        const filePath = findFileByItemId(rawId);
+        if (!filePath) return null;
+
+        let probe = null;
+        try { probe = await probeMedia(filePath); } catch {}
+
+        const existingKey = `${rawId}`;
+        if (hlsSessions.has(existingKey)) {
+            const existing = hlsSessions.get(existingKey);
+            if (existing.session && !existing.session.process.killed) {
+                return { sessionId: existing.session.id };
+            }
+            hlsSessions.delete(existingKey);
+        }
+
+        const session = await transcoder.startTranscode(filePath, probe);
+        hlsSessions.set(existingKey, { session, itemId: rawId, createdAt: Date.now() });
+        return { sessionId: session.id };
+    }
+
+    app.get('/Videos/:itemId/hls/master.m3u8', async (req, res) => {
+        try {
+            const result = await startHlsTranscode(req.params.itemId);
+            if (!result) return res.status(404).json({ error: "Item not found." });
+            const baseUrl = `/Videos/${req.params.itemId}/hls`;
+            const master = [
+                "#EXTM3U",
+                "#EXT-X-VERSION:3",
+                `#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"`,
+                `${baseUrl}/${result.sessionId}/playlist.m3u8`,
+            ].join("\n");
+            res.set("Content-Type", "application/vnd.apple.mpegurl");
+            res.set("Cache-Control", "no-cache");
+            res.send(master);
+        } catch (err) {
+            console.error("HLS master error:", err.message);
+            res.status(500).json({ error: "Transcoding failed." });
+        }
+    });
+
+    app.get('/Videos/:itemId/hls/:sessionId/playlist.m3u8', async (req, res) => {
+        try {
+            const playlist = transcoder.readPlaylist(req.params.sessionId);
+            if (!playlist) return res.status(404).json({ error: "Playlist not found." });
+            res.set("Content-Type", "application/vnd.apple.mpegurl");
+            res.set("Cache-Control", "no-cache");
+            res.send(playlist);
+        } catch (err) {
+            res.status(500).json({ error: "Failed to read playlist." });
+        }
+    });
+
+    app.get('/Videos/:itemId/hls/:sessionId/:segment', async (req, res) => {
+        try {
+            const segPath = transcoder.getSegmentPath(req.params.sessionId, req.params.segment);
+            if (!segPath) return res.status(404).json({ error: "Segment not found." });
+            res.set("Content-Type", "video/mp2t");
+            res.set("Cache-Control", "max-age=3600");
+            createReadStream(segPath).pipe(res);
+        } catch (err) {
+            res.status(500).json({ error: "Failed to serve segment." });
+        }
+    });
 
     // === Year ===
     app.get('/Years', (req, res) => { /* GetYears */ res.status(200).json({ message: 'Not implemented' }); });

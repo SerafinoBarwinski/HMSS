@@ -38,7 +38,7 @@ var JPI_Version = "10.11.11" //Jellyfin API Version
 
 
 // Todo: Add Args instead of Vars!
-const DEBUG_LOG_EVERY_REQUEST = false
+const DEBUG_LOG_EVERY_REQUEST = true
 const DEBUG_LOG_EVERY_WEBSCKT = false;
 const DEBUG_fail_integrity_check = false;
 
@@ -132,15 +132,16 @@ await webserver.addonRoutes(app)
 telerisingRoutes(app, getDb, port)
 app.use("/web", express.static("web"));
 
+
+try {
+    const mediaIndex = await StartMediaIndex();
+    globalThis.__mediaIndex = mediaIndex;
+} catch (err) {
+    console.error("Media-Index could not been created:", err);
+}
+
 const server = app.listen(port, "0.0.0.0", async () => {
     console.log(`HMSS listening on port ${port}`);
-
-    try {
-        const mediaIndex = await StartMediaIndex();
-        globalThis.__mediaIndex = mediaIndex;
-    } catch (err) {
-        console.error("Media-Index could not been created:", err);
-    }
 
     startTelerisingIfAutostart(db);
 });

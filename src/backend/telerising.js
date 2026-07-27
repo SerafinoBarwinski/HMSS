@@ -12,7 +12,7 @@ const BIN_PATH = path.resolve(__dirname, "../telerising/api");
 const SETTINGS_PATH = path.resolve(__dirname, "../telerising/settings.json");
 const CONFIG_FILES_DIR = path.resolve(__dirname, "../telerising/app/static/config_files");
 
-let telerisingProcess = null;
+export let telerisingProcess = null;
 export let telerisingPort = 5000;
 
 export function getLocalIp() {
@@ -355,15 +355,13 @@ export function startTelerisingIfAutostart(db) {
         stdio: ["ignore", "pipe", "pipe"],
     });
 
-    telerisingPort = 5000;
-
     telerisingProcess.stdout.on("data", (data) => {
         const line = data.toString();
         if (line.includes("Running on") || line.includes("Listening") || line.includes(" *")) {
         }
     });
-    console.log("Telerising started (autostart) on port " + telerisingPort);
-    if (firstProvider) console.log("Channels M3U: /telerising/live/" + firstProvider + "/channels.m3u");
+    console.log("Telerising automaticly started on port " + telerisingPort);
+    if (firstProvider) console.log("Telerising M3U: /telerising/live/" + firstProvider + "/channels.m3u");
 
     telerisingProcess.on("error", (err) => {
         console.error("Telerising autostart error:", err.message);
