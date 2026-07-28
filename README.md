@@ -103,6 +103,10 @@ and posters from TMDB and Fanart.tv.
 - **Rate Limiting**: Per-IP request throttling, localhost exempt
 - **Spam Protection**: Configurable IP-based request limiting
 
+## New Implementions into Jellyfin
+- NFC: NFC Based Automation
+- Telsering: Automatic Telsering Discovery as an Tuner
+
 ## What's Next
 
 - Adding remaning APIs

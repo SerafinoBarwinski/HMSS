@@ -32,14 +32,4 @@
             statusElement.textContent = `Error: ${error.message}`;
         }
     });
-
-    writeButton.addEventListener('click', async () => {
-        try {
-            const ndef = new NDEFReader();
-            await ndef.write("Hello, NFC!");
-            statusElement.textContent = 'NFC Tag Written: Hello, NFC!';
-        } catch (error) {
-            statusElement.textContent = `Error: ${error.message}`;
-        }
-    });
 </script>

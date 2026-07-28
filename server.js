@@ -35,11 +35,12 @@ var mediaDirs = {
 var ffmpeg_bin = "/bin/ffmpeg" //Fallback FFMPEG Path Arg
 var JPI_Version = "10.11.11" //Jellyfin API Version
 
-var DEBUG_LOG_EVERY_REQUEST = true
+var DEBUG_LOG_EVERY_REQUEST = false
 var DEBUG_LOG_EVERY_WEBSCKT = false;
 var DEBUG_fail_integrity_check = false;
 var DEBUG_skip_integrity_check = false;
 var DEBUG_TEA_POT = false;
+var DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = true;
 
 var is_server_ready = false;
 
@@ -196,11 +197,31 @@ if (DEBUG_LOG_EVERY_REQUEST) {
 
 const getDb = () => db;
 globalThis.__db = db;
+globalThis.__hmssDebugAcceptRemote = DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG;
 
 await webserver.hmssRoutes(app, getDb, JPI_Version, port, mediaDirs)
 await webserver.jellyfinRoutes(app, getDb, JPI_Version, mediaDirs, port)
 await webserver.addonRoutes(app)
 telerisingRoutes(app, getDb, port)
+
+// HMSS injection: patch index.html at serve time so Jellyfin web files stay vanilla
+import { readFileSync as _readFileSync } from "node:fs";
+const _hmssInjectionScript = '<script src="/web/hmss/jellyfin-injection.js"></script>';
+const _hmssInjectionCSS = '<link href="/web/hmss/themeoption.css" rel="stylesheet">';
+app.use("/web", (req, res, next) => {
+    // Only patch Jellyfin's vanilla index.html - alt_index.html is ours
+    if (req.path !== "/index.html") return next();
+    try {
+        const html = _readFileSync("web/index.html", "utf-8")
+            .replace("</head>", `${_hmssInjectionCSS}\n</head>`)
+            .replace("</body>", `${_hmssInjectionScript}\n</body>`);
+        res.set("Content-Type", "text/html; charset=utf-8");
+        res.send(html);
+    } catch {
+        next();
+    }
+});
+
 app.use("/web", express.static("web"));
 
 const server = app.listen(port, "0.0.0.0", async () => {

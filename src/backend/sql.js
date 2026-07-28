@@ -49,10 +49,25 @@ export async function init(rootPsw, db, argon2) {
             PRIMARY KEY (user_id, item_id),
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
+
+        create table if not exists "user_nfc" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+            "user_id" INTEGER not null,
+            "tag_id" TEXT not null,
+            "tag_name" TEXT not null default '',
+            "action_type" TEXT not null default 'none',
+            "action_payload" TEXT not null default '{}',
+            "created_at" TEXT not null default CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id, tag_id)
+        );
     `); // PERMS: 0 - 3; where 3 is root and 2 admin. 1 manager and 0 visitor
 
     // add uuid column to existing tables (harmless if already exists)
     try { db.exec("ALTER TABLE users ADD COLUMN uuid TEXT"); } catch {}
+
+    try { db.exec('ALTER TABLE user_nfc ADD COLUMN "description" TEXT not null default \'\''); } catch {}
+    try { db.exec('ALTER TABLE user_nfc ADD COLUMN "is_from_ha" BOOLEAN not null default 0'); } catch {}
 
     // migrate: add UUID to existing users that don't have one
     const missingUuid = db.prepare("SELECT id FROM users WHERE uuid IS NULL").all();
@@ -395,4 +410,31 @@ export function getPlayedItems(db, userId, limit) {
         LIMIT ?
     `).all(userId, limit || 12);
     return rows;
+}
+
+export function getUserNFCs(db, userId) {
+    return db.prepare("SELECT * FROM user_nfc WHERE user_id = ? ORDER BY created_at DESC").all(userId);
+}
+
+export function getNFCByTagId(db, userId, tagId) {
+    return db.prepare("SELECT * FROM user_nfc WHERE user_id = ? AND tag_id = ?").get(userId, tagId);
+}
+
+export function addOrUpdateNFC(db, userId, tagId, tagName, actionType, data, description, isFromHA) {
+    const existing = db.prepare("SELECT id, is_from_ha FROM user_nfc WHERE user_id = ? AND tag_id = ?").get(userId, tagId);
+    if (existing) {
+        const mergedHA = existing.is_from_ha ? true : Boolean(isFromHA);
+        db.prepare("UPDATE user_nfc SET tag_name = ?, action_type = ?, action_payload = ?, description = ?, is_from_ha = ? WHERE user_id = ? AND tag_id = ?")
+            .run(tagName || "", actionType || "none", data || "", description || "", mergedHA ? 1 : 0, userId, tagId);
+        return { id: existing.id, updated: true };
+    } else {
+        const result = db.prepare("INSERT INTO user_nfc (user_id, tag_id, tag_name, action_type, action_payload, description, is_from_ha) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .run(userId, tagId, tagName || "", actionType || "none", data || "", description || "", isFromHA ? 1 : 0);
+        return { id: result.lastInsertRowid, updated: false };
+    }
+}
+
+export function removeNFC(db, userId, tagId) {
+    const result = db.prepare("DELETE FROM user_nfc WHERE user_id = ? AND tag_id = ?").run(userId, tagId);
+    return result.changes > 0;
 }

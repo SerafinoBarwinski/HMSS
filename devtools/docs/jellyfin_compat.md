@@ -1,3 +1,5 @@
+THIS DOKU IS NOT WRITTEN YET
+
 # Jellyfin API Compatibility Notes
 
 ## Mandatory UUIDs

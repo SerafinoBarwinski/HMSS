@@ -13,12 +13,14 @@
   "dependencies": {
     "argon2": "^0.45.0",
     "better-sqlite3": "^13.0.1",
+    "eruda": "^3.4.3",
     "express": "^5.2.1",
     "fast-xml-parser": "^5.10.1",
     "figlet": "^1.11.3",
     "file-type": "^22.0.1",
     "image-size": "^2.0.2",
     "pm2": "^7.0.3",
+    "saxes": "^6.0.0",
     "ws": "^8.21.1",
     "yaml": "^2.9.0"
   },

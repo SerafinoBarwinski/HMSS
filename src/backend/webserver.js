@@ -1,6 +1,6 @@
 import { getAddons, getAddonsByCapability, searchAll } from "./addon_loader.js";
 import { authMiddleware, hmssAuthRoutes } from "./auth.js";
-import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems } from "./sql.js";
+import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems, getUserNFCs, getNFCByTagId, addOrUpdateNFC, removeNFC } from "./sql.js";
 import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { getItemMeta } from "./meta_reader.js";
@@ -51,7 +51,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             "/LiveTv",
             "/Users/Authenticate",
             "/QuickConnect",
-            "/Notifications"
+            "/Notifications",
+            "/hmss/remote-debug"
         ];
 
         if (NO_CACHE_ROUTES.some(route => req.path.startsWith(route))) {
@@ -60,6 +61,10 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             res.set("Expires", "0");
         }
         next();
+    });
+
+    app.get("/eruda", (req, res) => {
+        res.sendFile(path.join(__dirname, "../../node_modules/eruda/eruda.js"));
     });
 
     app.get("/", (req, res) => {
@@ -82,21 +87,92 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.sendFile(path.join(__dirname, "../../web/hmss/img/logo.png"));
     });
 
-    // NFC will be implemented in the future.
-    app.get("/hmss/nfc/", (req, res) => {
-        res.status(200).json({ message: 'Not implemented' });
+    // NFC tag management
+    const HA_TAG_REGEX = /^https?:\/\/(www\.)?home-assistant\.io\/tag\/(.+)$/i;
+
+    app.get("/hmss/nfc/:UserID", (req, res) => {
+        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
+        const db = getDb();
+        const nfcTags = getUserNFCs(db, req.user.id);
+        res.json({
+            Items: nfcTags.map(n => ({
+                Id: n.id,
+                UserId: String(n.user_id),
+                TagId: n.tag_id,
+                TagName: n.tag_name,
+                TagDescription: n.description || "",
+                ActionType: n.action_type,
+                data: n.action_payload || "",
+                isFromHA: Boolean(n.is_from_ha),
+                CreatedAt: n.created_at,
+            })),
+            TotalRecordCount: nfcTags.length,
+        });
     });
 
-    app.get("/hmss/nfc/:id", (req, res) => {
-        res.status(200).json({ message: 'Not implemented' });
+    app.post("/hmss/nfc/:UserID/:TagID", (req, res) => {
+        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
+        const db = getDb();
+        const { TagName, TagDescription, ActionType, data, isFromHA } = req.body || {};
+
+        let finalTagId = req.params.TagID;
+        let detectedHA = Boolean(isFromHA);
+
+        const haMatch = finalTagId.match(HA_TAG_REGEX);
+        if (haMatch) {
+            finalTagId = haMatch[2];
+            detectedHA = true;
+        }
+
+        const existing = getNFCByTagId(db, req.user.id, finalTagId);
+        if (existing && existing.is_from_ha && !detectedHA) {
+            return res.status(409).json({ error: "This tag was scanned via Home Assistant and its UUID cannot be changed." });
+        }
+
+        const result = addOrUpdateNFC(
+            db,
+            req.user.id,
+            finalTagId,
+            TagName || "",
+            ActionType || "none",
+            data || "",
+            TagDescription || "",
+            detectedHA
+        );
+        res.status(result.updated ? 200 : 201).json({
+            Id: result.id,
+            UserId: String(req.user.id),
+            TagId: finalTagId,
+            TagName: TagName || "",
+            TagDescription: TagDescription || "",
+            ActionType: ActionType || "none",
+            data: data || "",
+            isFromHA: detectedHA,
+            Updated: result.updated,
+        });
     });
 
-    app.post("/hmss/nfc/:id", (req, res) => {
-        res.status(200).json({ message: 'Not implemented' });
+    app.delete("/hmss/nfc/:UserID/:TagID", (req, res) => {
+        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
+        const db = getDb();
+        const removed = removeNFC(db, req.user.id, req.params.TagID);
+        if (!removed) return res.status(404).json({ error: "NFC tag not found." });
+        res.status(204).end();
     });
 
-    app.delete("/hmss/nfc/:id", (req, res) => {
-        res.status(200).json({ message: 'Not implemented' });
+    app.post("/hmss/remote-debug", (req, res) => {
+        if (!globalThis.__hmssDebugAcceptRemote) return res.status(403).json({ error: "Remote debug disabled." });
+        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
+        const { level, message, timestamp } = req.body || {};
+        if (!message) return res.status(400).json({ error: "Message required." });
+        const prefix = "[Client-" + req.user.id + "]";
+        const ts = timestamp ? "[" + timestamp + "]" : "";
+        switch (level) {
+            case "error": console.error(prefix + ts, message); break;
+            case "warn": console.warn(prefix + ts, message); break;
+            default: console.log(prefix + ts, message); break;
+        }
+        res.status(204).end();
     });
 
 
@@ -265,8 +341,24 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         serveItemImage(req, res, "Primary");
     });
 
+    app.get("/Items/:itemId/Images/Backdrop", (req, res) => {
+        serveItemImage(req, res, "Backdrop");
+    });
+
+    app.get("/Items/:itemId/Images/Thumb", (req, res) => {
+        serveItemImage(req, res, "Thumb");
+    });
+
     app.get("/Users/:userId/Items/:itemId/Images/Primary", (req, res) => {
         serveItemImage(req, res, "Primary");
+    });
+
+    app.get("/Users/:userId/Items/:itemId/Images/Backdrop", (req, res) => {
+        serveItemImage(req, res, "Backdrop");
+    });
+
+    app.get("/Users/:userId/Items/:itemId/Images/Thumb", (req, res) => {
+        serveItemImage(req, res, "Thumb");
     });
 
     app.get("/web/ConfigurationPages", (req, res) => {
@@ -376,6 +468,40 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
     function serveItemImage(req, res, imageType) {
         const rawId = (req.params.itemId || "").replace(/-/g, "");
+
+        // resolve library-level IDs to a random item from that library
+        const LIB_LOOKUP = {
+            [generateItemId("movies")]: "movie",
+            [generateItemId("tvshows")]: "shows",
+            [generateItemId("shows")]: "shows",
+            [generateItemId("music")]: "music",
+        };
+        const libKey = LIB_LOOKUP[rawId];
+        if (libKey) {
+            const index = globalThis.__mediaIndex || {};
+            const entries = index[libKey] || [];
+            if (entries.length > 0) {
+                var shuffled = [].concat(entries).sort(function () { return Math.random() - 0.5; });
+                for (var i = 0; i < shuffled.length && i < 20; i++) {
+                    var fp = shuffled[i].filePath || shuffled[i].showName;
+                    if (!fp) continue;
+                    var libDir = fp.substring(0, fp.lastIndexOf("/"));
+                    var libParentDir = libDir + "/..";
+                    var libImg = findImageInDir(libDir, imageType) || findImageInDir(libParentDir, imageType) || findPosterPath(fp);
+                    if (libImg) {
+                        try {
+                            var s = statSync(libImg.path);
+                            var imgExt = libImg.path.split(".").pop();
+                            var mime = imgExt === "png" ? "image/png" : imgExt === "webp" ? "image/webp" : "image/jpeg";
+                            res.set("Content-Type", mime);
+                            res.set("Content-Length", s.size);
+                            return createReadStream(libImg.path).pipe(res);
+                        } catch { return res.status(404).end(); }
+                    }
+                }
+            }
+            return res.status(404).end();
+        }
 
         // LiveTV channel logo proxy
         const tvChannel = findLiveTvChannel(rawId);
@@ -774,25 +900,41 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const serverId = sys?.id || "hmss-local";
         const userId = req.user.id;
         const limit = parseInt(req.query.Limit || req.query.limit) || 12;
-        const includeItemTypes = (req.query.IncludeItemTypes || req.query.includeItemTypes || "Episode,Movie").split(",").map(t => t.trim());
-        const rows = getResumableItems(db, userId, "Video", limit * 3);
+        const mediaTypes = (req.query.MediaTypes || req.query.mediaTypes || "Video").split(",").map(t => t.trim());
+
+        var indexKeys = [];
+        var typeFilters = [];
+        mediaTypes.forEach(function (mt) {
+            if (mt === "Video") { indexKeys.push("movies", "shows"); typeFilters.push("Movie", "Episode"); }
+            else if (mt === "Audio") { indexKeys.push("music"); typeFilters.push("Audio"); }
+            else if (mt === "Book") { indexKeys.push("unsorted"); typeFilters.push("Book"); }
+        });
+        if (indexKeys.length === 0) return res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+
+        const rows = getResumableItems(db, userId, null, limit * 3);
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
         const items = [];
         for (const row of rows) {
             if (items.length >= limit) break;
-            let match = null;
-            let entryType = null;
-            let jellyfinType = null;
-            for (const m of index.movies || []) {
-                if (generateItemId(m.id || m.filePath) === row.item_id) { match = m; entryType = "movie"; jellyfinType = "Movie"; break; }
-            }
-            if (!match) {
-                for (const ep of index.shows || []) {
-                    if (generateItemId(ep.id || ep.filePath) === row.item_id) { match = ep; entryType = "show"; jellyfinType = "Episode"; break; }
+            var match = null;
+            var entryType = null;
+            var jellyfinType = null;
+            for (var ki = 0; ki < indexKeys.length; ki++) {
+                var ik = indexKeys[ki];
+                var entries = index[ik] || [];
+                for (var ei = 0; ei < entries.length; ei++) {
+                    var e = entries[ei];
+                    if (generateItemId(e.id || e.filePath) === row.item_id) {
+                        match = e;
+                        entryType = ik === "movies" ? "movie" : ik === "shows" ? "show" : ik;
+                        jellyfinType = typeFilters[ki];
+                        break;
+                    }
                 }
+                if (match) break;
             }
-            if (!match || !includeItemTypes.includes(jellyfinType)) continue;
-            const item = mapToJellyfinItem({
+            if (!match || !typeFilters.includes(jellyfinType)) continue;
+            var item = mapToJellyfinItem({
                 id: match.id, title: match.title, showName: match.showName,
                 season: match.season, episode: match.episode, year: match.year,
                 filePath: match.filePath, overview: match.overview,
@@ -1188,15 +1330,80 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             music: generateItemId("music"),
             livetv: generateItemId("livetv"),
         };
-        const items = [
-            { Name: "Movies", CollectionType: "movies", Id: LIB_IDS.movies, IsFolder: true, Type: "CollectionFolder", ServerId: getSystemInfo(getDb())?.id || "hmss-local", SortName: "movies", Path: "media/movie", ChannelId: null, DateCreated: new Date().toISOString(), CanDelete: false, CanDownload: false, ExternalUrls: [], EnableMediaSourceDisplay: true, PlayAccess: "Full", Taglines: [], Genres: [], RemoteTrailers: [], ProviderIds: {}, People: [], Studios: [], GenreItems: [], LocalTrailerCount: 0, SpecialFeatureCount: 0, DisplayPreferencesId: LIB_IDS.movies, Tags: [], PrimaryImageAspectRatio: 1.7777777777777777, ImageTags: {}, BackdropImageTags: [], ImageBlurHashes: {}, LocationType: "FileSystem", MediaType: "Unknown", LockedFields: [], LockData: false, UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(LIB_IDS.movies), ItemId: LIB_IDS.movies } },
-            { Name: "Shows", CollectionType: "tvshows", Id: LIB_IDS.tvshows, IsFolder: true, Type: "CollectionFolder", ServerId: getSystemInfo(getDb())?.id || "hmss-local", SortName: "shows", Path: "media/shows", ChannelId: null, DateCreated: new Date().toISOString(), CanDelete: false, CanDownload: false, ExternalUrls: [], EnableMediaSourceDisplay: true, PlayAccess: "Full", Taglines: [], Genres: [], RemoteTrailers: [], ProviderIds: {}, People: [], Studios: [], GenreItems: [], LocalTrailerCount: 0, SpecialFeatureCount: 0, DisplayPreferencesId: LIB_IDS.tvshows, Tags: [], PrimaryImageAspectRatio: 1.7777777777777777, ImageTags: {}, BackdropImageTags: [], ImageBlurHashes: {}, LocationType: "FileSystem", MediaType: "Unknown", LockedFields: [], LockData: false, UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(LIB_IDS.tvshows), ItemId: LIB_IDS.tvshows } },
-            { Name: "Music", CollectionType: "music", Id: LIB_IDS.music, IsFolder: true, Type: "CollectionFolder", ServerId: getSystemInfo(getDb())?.id || "hmss-local", SortName: "music", Path: "media/music", ChannelId: null, DateCreated: new Date().toISOString(), CanDelete: false, CanDownload: false, ExternalUrls: [], EnableMediaSourceDisplay: true, PlayAccess: "Full", Taglines: [], Genres: [], RemoteTrailers: [], ProviderIds: {}, People: [], Studios: [], GenreItems: [], LocalTrailerCount: 0, SpecialFeatureCount: 0, DisplayPreferencesId: LIB_IDS.music, Tags: [], PrimaryImageAspectRatio: 1.7777777777777777, ImageTags: {}, BackdropImageTags: [], ImageBlurHashes: {}, LocationType: "FileSystem", MediaType: "Unknown", LockedFields: [], LockData: false, UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(LIB_IDS.music), ItemId: LIB_IDS.music } },
+
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+
+        function randomImageTag(entries, imageType) {
+            if (!entries || entries.length === 0) return null;
+            var shuffled = [].concat(entries).sort(function () { return Math.random() - 0.5; });
+            for (var i = 0; i < shuffled.length && i < 20; i++) {
+                var fp = shuffled[i].filePath || shuffled[i].showName;
+                if (!fp) continue;
+                var dir = fp.substring(0, fp.lastIndexOf("/"));
+                var img = findImageInDir(dir, imageType) || findImageInDir(dir + "/..", imageType) || findPosterPath(fp);
+                if (img) return img.tag;
+            }
+            return null;
+        }
+
+        function randomBackdropTag(entries) {
+            if (!entries || entries.length === 0) return null;
+            var shuffled = [].concat(entries).sort(function () { return Math.random() - 0.5; });
+            for (var i = 0; i < shuffled.length && i < 20; i++) {
+                var fp = shuffled[i].filePath || shuffled[i].showName;
+                if (!fp) continue;
+                var dir = fp.substring(0, fp.lastIndexOf("/"));
+                var parentDir = dir + "/..";
+                var img = findImageInDir(dir, "Backdrop") || findImageInDir(parentDir, "Backdrop");
+                if (img) return img.tag;
+            }
+            return null;
+        }
+
+        var showNames = [];
+        var seen = {};
+        for (var s = 0; s < (index.shows || []).length; s++) {
+            var sn = index.shows[s].showName;
+            if (sn && !seen[sn]) { seen[sn] = true; showNames.push(index.shows[s]); }
+        }
+
+        var movieTag = randomImageTag(index.movies, "Primary");
+        var movieBackdrop = randomBackdropTag(index.movies);
+        var showTag = randomImageTag(showNames, "Primary");
+        var showBackdrop = randomBackdropTag(showNames);
+        var musicTag = randomImageTag(index.music, "Primary");
+
+        function makeUserView(name, collectionType, id, path, imgTag, bdTag) {
+            var item = {
+                Name: name, CollectionType: collectionType, Id: id, IsFolder: true,
+                Type: "CollectionFolder", ServerId: getSystemInfo(getDb())?.id || "hmss-local",
+                SortName: collectionType, Path: path, ChannelId: null,
+                DateCreated: new Date().toISOString(), CanDelete: false, CanDownload: false,
+                ExternalUrls: [], EnableMediaSourceDisplay: true, PlayAccess: "Full",
+                Taglines: [], Genres: [], RemoteTrailers: [], ProviderIds: {},
+                People: [], Studios: [], GenreItems: [], LocalTrailerCount: 0,
+                SpecialFeatureCount: 0, DisplayPreferencesId: id, Tags: [],
+                PrimaryImageAspectRatio: 1.7777777777777777,
+                ImageTags: imgTag ? { Primary: imgTag } : {},
+                BackdropImageTags: bdTag ? [bdTag] : [],
+                ImageBlurHashes: {},
+                LocationType: "FileSystem", MediaType: "Unknown",
+                LockedFields: [], LockData: false,
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(id), ItemId: id }
+            };
+            return item;
+        }
+
+        var items = [
+            makeUserView("Movies", "movies", LIB_IDS.movies, "media/movie", movieTag, movieBackdrop),
+            makeUserView("Shows", "tvshows", LIB_IDS.tvshows, "media/shows", showTag, showBackdrop),
+            makeUserView("Music", "music", LIB_IDS.music, "media/music", musicTag, null),
         ];
+
         const db = getDb();
         const ltConfig = (() => { try { return JSON.parse((getSystemInfo(db)?.config_json || "{}")).livetv; } catch { return null; } })();
         if (ltConfig?.TunerHosts?.length > 0) {
-            items.push({ Name: "Live TV", CollectionType: "livetv", Id: LIB_IDS.livetv, IsFolder: true, Type: "CollectionFolder", ServerId: getSystemInfo(getDb())?.id || "hmss-local", SortName: "livetv", Path: "", ChannelId: null, DateCreated: new Date().toISOString(), CanDelete: false, CanDownload: false, ExternalUrls: [], EnableMediaSourceDisplay: true, PlayAccess: "Full", Taglines: [], Genres: [], RemoteTrailers: [], ProviderIds: {}, People: [], Studios: [], GenreItems: [], LocalTrailerCount: 0, SpecialFeatureCount: 0, DisplayPreferencesId: LIB_IDS.livetv, Tags: [], PrimaryImageAspectRatio: 1.7777777777777777, ImageTags: {}, BackdropImageTags: [], ImageBlurHashes: {}, LocationType: "FileSystem", MediaType: "Unknown", LockedFields: [], LockData: false, UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: addDashesToUuid(LIB_IDS.livetv), ItemId: LIB_IDS.livetv } });
+            items.push(makeUserView("Live TV", "livetv", LIB_IDS.livetv, "", null, null));
         }
         res.json({ Items: items, TotalRecordCount: items.length });
     });
@@ -2154,6 +2361,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
             RecordingPostProcessorArguments: "",
             SaveRecordingNFO: true,
             SaveRecordingImages: true,
+            ChannelMappings: [],
         };
     }
 
@@ -2297,14 +2505,245 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         });
     });
 
-    app.get('/LiveTv/ChannelMappingOptions', (req, res) => {
+    function _extractChannelsFallback(text) {
+        var channels = [];
+        var re = /<channel\s+id=(["'])([^"']*?)\1[\s\S]*?<\/channel\s*>/gi;
+        var dnRe = /<display-name[^>]*>([^<]*)<\//gi;
+        var match;
+        while ((match = re.exec(text)) !== null) {
+            var chId = match[2];
+            var dnMatch = dnRe.exec(match[0]);
+            dnRe.lastIndex = 0;
+            var name = dnMatch ? dnMatch[1].trim() : chId;
+            channels.push({ Name: name, Id: chId });
+        }
+        return channels;
+    }
+
+    async function _fetchProviderChannels(config, providerId) {
+        var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
+        if (!provider || !provider.Path) return [];
+        try {
+            var resp = await fetch(provider.Path);
+            if (!resp.ok) return [];
+            var buf = await resp.arrayBuffer();
+            var raw = new Uint8Array(buf);
+            var text;
+            if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) {
+                var zlib = await import("node:zlib");
+                text = zlib.gunzipSync(Buffer.from(raw)).toString("utf-8");
+            } else {
+                text = new TextDecoder("utf-8", { fatal: false }).decode(raw);
+            }
+            text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
+            var firstLt = text.indexOf("<");
+            if (firstLt > 0) text = text.substring(firstLt);
+            text = text.replace(/<\?xml[\s\S]*?\?>/g, "").replace(/<!DOCTYPE[\s\S]*?>/g, "").trim();
+            if (text.charAt(0) !== "<") return [];
+            var channels = [];
+            try {
+                var { SaxesParser } = await import("saxes");
+                var parser = new SaxesParser({ lowercase: true });
+                var currentChannel = null;
+                parser.on("opentag", function (node) {
+                    if (node.name === "channel") {
+                        currentChannel = { Id: node.attributes.id || "", Name: "" };
+                    } else if (currentChannel && node.name === "display-name" && !currentChannel.Name) {
+                        currentChannel._capture = true;
+                    }
+                });
+                parser.on("text", function (txt) {
+                    if (currentChannel && currentChannel._capture) currentChannel.Name += txt;
+                });
+                parser.on("cdata", function (txt) {
+                    if (currentChannel && currentChannel._capture) currentChannel.Name += txt;
+                });
+                parser.on("closetag", function (node) {
+                    var n = node.name;
+                    if (n === "display-name" && currentChannel) {
+                        currentChannel._capture = false;
+                        if (currentChannel.Name) currentChannel.Name = currentChannel.Name.trim();
+                    } else if (n === "channel" && currentChannel) {
+                        if (!currentChannel.Name) currentChannel.Name = currentChannel.Id;
+                        channels.push(currentChannel);
+                        currentChannel = null;
+                    }
+                });
+                parser.write(text).close();
+            } catch (e) {
+                console.error("saxes error, falling back to regex:", e.message);
+            }
+            if (channels.length === 0) channels = _extractChannelsFallback(text);
+            return channels;
+        } catch (e) {
+            console.error("XMLTV fetch error:", e);
+            return [];
+        }
+    }
+
+    function _buildCountryNames() {
+        var names = [];
+        try {
+            var countries = JSON.parse(readFileSync(new URL('./countries.json', import.meta.url), 'utf-8'));
+            countries.forEach(function(c) {
+                if (c.DisplayName) names.push(c.DisplayName.toLowerCase());
+            });
+        } catch (e) {}
+
+        //Fallback - sorry, but we cant do all the countries, so we will just add some common ones
+        // German country names commonly used in channel names
+        names.push('deutschland', 'österreich', 'schweiz', 'frankreich', 'italien', 'spanien', 'niederlande', 'großbritannien', 'uk', 'usa');
+        return names;
+    }
+    var _countryNames = _buildCountryNames();
+
+    app.get('/LiveTv/ChannelMappingOptions', async (req, res) => {
         if (!req.user) return res.status(401).end();
-        res.json({ MappingOptions: [], Mappings: [], ProviderName: "" });
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const providerId = req.query.providerId || "";
+
+        const tvChannels = await getLiveTvChannels(db);
+        const tunerChannels = tvChannels.map(function (ch) {
+            return {
+                Id: ch.Id,
+                Name: ch.Name,
+                Number: ch.Number,
+                ProviderChannelName: "",
+                ProviderChannelId: "",
+            };
+        });
+
+        var providerChannels = [];
+        var providerName = "";
+        var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
+        if (provider && provider.Path) {
+            providerName = provider.Type || "xmltv";
+            providerChannels = await _fetchProviderChannels(config, providerId);
+        }
+
+        var mappings = (config.ChannelMappings || []).filter(function (m) { return m.ProviderId === providerId; }).map(function (m) {
+            return { Name: m.TunerChannelId, Value: m.ProviderChannelId };
+        });
+
+        if (mappings.length === 0 && providerChannels.length > 0 && tunerChannels.length > 0) {
+            var allMappingsEmpty = !(config.ChannelMappings || []).length;
+            if (allMappingsEmpty) {
+                var pMap = {};
+                var countryPrefixRe = /^([a-z]{2})\s*-\s+/;
+                providerChannels.forEach(function (pc) {
+                    var key = pc.Name.toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
+                    if (!pMap[key]) pMap[key] = [];
+                    pMap[key].push(pc);
+                    var tldMatch = pc.Name.match(/\.[a-z]{2,}$/i);
+                    if (tldMatch) {
+                        var keyNoTld = key.replace(/\.[a-z]{2,}$/i, "").trim();
+                        if (keyNoTld && keyNoTld !== key) {
+                            if (!pMap[keyNoTld]) pMap[keyNoTld] = [];
+                            pMap[keyNoTld].push(pc);
+                        }
+                    }
+                    var prefixMatch = key.match(countryPrefixRe);
+                    if (prefixMatch) {
+                        var keyNoPrefix = key.replace(countryPrefixRe, "").trim();
+                        if (keyNoPrefix && keyNoPrefix !== key) {
+                            if (!pMap[keyNoPrefix]) pMap[keyNoPrefix] = [];
+                            pMap[keyNoPrefix].push(pc);
+                        }
+                    }
+                });
+
+                mappings = tunerChannels.map(function (tc) {
+                    var key = tc.Name.toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
+                    var matches = pMap[key] || [];
+                    if (matches.length >= 1) {
+                        return { Name: tc.Id, Value: matches[0].Id };
+                    }
+                    for (var si = 0; si < _countryNames.length; si++) {
+                        var suffix = _countryNames[si];
+                        if (key.length > suffix.length && key.indexOf(suffix, key.length - suffix.length) !== -1) {
+                            var keyStripped = key.substring(0, key.length - suffix.length).trim();
+                            if (keyStripped) {
+                                matches = pMap[keyStripped] || [];
+                                if (matches.length >= 1) {
+                                    return { Name: tc.Id, Value: matches[0].Id };
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                }).filter(Boolean);
+            }
+        }
+
+        var pLookup = {};
+        providerChannels.forEach(function (pc) { pLookup[pc.Id] = pc; });
+        tunerChannels.forEach(function (tc) {
+            var match = mappings.find(function (m) { return m.Name === tc.Id; });
+            if (match && pLookup[match.Value]) {
+                tc.ProviderChannelName = pLookup[match.Value].Name;
+                tc.ProviderChannelId = match.Value;
+            }
+        });
+
+        res.json({
+            TunerChannels: tunerChannels,
+            ProviderChannels: providerChannels,
+            Mappings: mappings,
+            ProviderName: providerName,
+        });
     });
 
-    app.post('/LiveTv/ChannelMappings', (req, res) => {
+    app.post('/LiveTv/ChannelMappings', async (req, res) => {
         if (!req.user) return res.status(401).end();
-        res.json({ StatusCode: 200 });
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const body = req.body || {};
+
+        var pId = body.ProviderId || body.providerId;
+        var tId = body.TunerChannelId || body.tunerChannelId;
+        var pcId = body.ProviderChannelId || body.providerChannelId;
+
+        if (!pId || !tId || !pcId) {
+            return res.status(400).json({ error: "ProviderId, TunerChannelId and ProviderChannelId required." });
+        }
+
+        var channelMappings = config.ChannelMappings || [];
+        var existingIdx = channelMappings.findIndex(function (m) {
+            return m.ProviderId === pId && m.TunerChannelId === tId;
+        });
+
+        var mapping = {
+            ProviderId: pId,
+            TunerChannelId: tId,
+            ProviderChannelId: pcId,
+        };
+
+        if (existingIdx >= 0) {
+            channelMappings[existingIdx] = mapping;
+        } else {
+            channelMappings.push(mapping);
+        }
+        config.ChannelMappings = channelMappings;
+        setLiveTvConfig(db, config);
+
+        var tvChannels = await getLiveTvChannels(db);
+        var ch = tvChannels.find(function (c) { return c.Id === tId; });
+        var pChannels = await _fetchProviderChannels(config, pId);
+        var pCh = pChannels.find(function (c) { return c.Id === pcId; });
+        res.json({
+            Id: tId,
+            Name: ch ? ch.Name : "",
+            ProviderChannelName: pCh ? pCh.Name : "",
+            ProviderChannelId: pcId,
+        });
+    });
+
+    app.get('/LiveTv/ListingProviders', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        res.json(config.ListingProviders || []);
     });
 
     app.get('/LiveTv/ListingProviders/Default', (req, res) => {
@@ -2324,11 +2763,45 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
 
     app.post('/LiveTv/ListingProviders', (req, res) => {
         if (!req.user) return res.status(401).end();
-        res.json({ StatusCode: 200 });
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const body = req.body || {};
+
+        if (!body.Type) return res.status(400).json({ error: "Type required." });
+
+        const provider = {
+            Type: body.Type,
+            Path: body.Path || "",
+            MoviePrefix: body.MoviePrefix || null,
+            UserAgent: body.UserAgent || null,
+            MovieCategories: body.MovieCategories || [],
+            KidsCategories: body.KidsCategories || [],
+            NewsCategories: body.NewsCategories || [],
+            SportsCategories: body.SportsCategories || [],
+            EnableAllTuners: body.EnableAllTuners !== false,
+            EnabledTuners: body.EnabledTuners || [],
+            Id: body.Id || generateItemId(body.Path + Date.now()),
+        };
+
+        const existingIdx = config.ListingProviders.findIndex(p => p.Id === provider.Id);
+        if (existingIdx >= 0) {
+            config.ListingProviders[existingIdx] = provider;
+        } else {
+            config.ListingProviders.push(provider);
+        }
+
+        setLiveTvConfig(db, config);
+        res.json(provider);
     });
 
     app.delete('/LiveTv/ListingProviders', (req, res) => {
         if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const id = req.query.id || req.body?.id;
+        if (!id) return res.status(400).json({ error: "Id required." });
+        config.ListingProviders = config.ListingProviders.filter(p => p.Id !== id);
+        setLiveTvConfig(db, config);
         res.json({ StatusCode: 200 });
     });
 

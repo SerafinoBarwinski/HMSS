@@ -1,1 +1,229 @@
-<h1>To be added</h1>
+<button onClick="run()" id="ActivateScriptButton">We need any kind of Input so your Browser doesnt flag the Script.
+    Klick me!</button>
+<div id="main" class="page type-interior pluginConfigurationPage configPage." data-role="page"
+    data-require="emby-input,emby-button"
+    style="display: none; max-width: 90%; justify-content: center; margin: 0 auto;">
+    <div data-role="content">
+        <div class="content-primary">
+            <h1>NFC Tags</h1>
+            <p>Register and manage NFC tags for your Jellyfin setup. Also Add Actions to your tags.</p>
+            <small id="nfcHint">...</small>
+        </div>
+        <div class="content-secondary">
+            <h2>Customize NFC Tags</h2>
+            <form>
+                <div id="nfcNeedsScanAbility">
+                    <div class="inputContainer">
+                        <button is="emby-button" id="NFCTag_SCAN_UUID" label="Scan Tag">Scan Tag</button>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="NFCTag_UUID" label="Tag UUID" />
+                        <div class="fieldDescription">Unique identifier for the NFC tag</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="NFCTag_Name" label="Tag Name" />
+                        <div class="fieldDescription">Name of the NFC tag</div>
+                    </div>
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="NFCTag_Description" label="Tag Description" />
+                        <div class="fieldDescription">Description of the NFC tag</div>
+                    </div>
+                </div>
+                <div class="inputContainer">
+                    <select is="emby-select" id="NFCTag_Action" name="NFCTag_Action" label="Tag Action">
+                        <option value="playmedia">Start Media Playback</option>
+                        <option value="changepage">Change Page</option>
+                        <option value="None" selected>None</option>
+                    </select>
+                    <input is="emby-input" type="text" id="NFCTag_Data"
+                        label="Tag Data (e.g. Item ID or URL and more)" />
+                    <div class="fieldDescription">Action to perform when the NFC tag is read</div>
+                </div>
+                <button is="emby-button" type="submit" id="NFCTag_Save" class="raised button-submit block"
+                    style="max-width: 200px;">Save Tag</button>
+            </form>
+        </div>
+
+        <div id="NFCTag_List_Div">
+            <h2>Registered NFC Tags</h2>
+            <button is="emby-button" id="NFCTag_Refresh" label="Refresh List" class="raised button-submit block"
+                style="max-width: 200px;">Refresh List</button>
+            <div id="NFCTag_List" class="vertical-list"></div>
+
+        </div>
+        <script>
+            // has to be in a function to work properly with jellyfin-injection.js. Dont ask me why, I have no idea.
+            async function run() {
+                const main = document.getElementById('main');
+                main.style.display = 'flex';
+                const actionButton = document.getElementById('ActivateScriptButton');
+                actionButton.style.display = 'none';
+
+                const NFCstatusElement = document.getElementById('nfcHint');
+                var NFCCompatible = true;
+                const forceAllowNFC = false;
+
+                const NFCTag_Name = document.getElementById('NFCTag_Name');
+                const NFCTag_UUID = document.getElementById('NFCTag_UUID');
+                const NFCTag_Description = document.getElementById('NFCTag_Description');
+                const NFCTag_Action = document.getElementById('NFCTag_Action');
+                const NFCTag_Data = document.getElementById('NFCTag_Data');
+                const NFCTag_SCAN_UUID = document.getElementById('NFCTag_SCAN_UUID');
+                const nfcNeedsScanAbilityDiv = document.getElementById('nfcNeedsScanAbility');
+
+                const NFCTag_List_Div = document.getElementById('NFCTag_List_Div');
+                const NFCTag_List = document.getElementById('NFCTag_List');
+
+                var _currentEditIsHA = false;
+                function getAuthHeaders() {
+                    var token = window.ApiClient?.accessToken() || "";
+                    return {
+                        "X-Emby-Authorization": 'MediaBrowser Token="' + token + '"',
+                        "Content-Type": "application/json"
+                    };
+                }
+
+                try {
+                    let ndef = new NDEFReader();
+                    await ndef.scan()
+                } catch (error) {
+                    console.warn('Web NFC Err:', error);
+                    NFCCompatible = false;
+                }
+
+                if (!NFCCompatible && !forceAllowNFC) {
+                    NFCstatusElement.innerText = 'Web NFC is not supported on this device. You may want to use a different device or browser that supports Web NFC and make sure your connection is secure.';
+                    NFCstatusElement.style.color = 'red';
+                    NFCTag_SCAN_UUID.style.display = 'none';
+                    //nfcNeedsScanAbilityDiv.style.display = 'none';
+                } else {
+                    NFCstatusElement.innerText = 'Web NFC is supported on this device. You can scan NFC tags.';
+                    NFCstatusElement.style.color = 'green';
+
+                    NFCTag_SCAN_UUID.style.display = 'block';
+
+                    NFCTag_SCAN_UUID.addEventListener('click', async () => {
+                        try {
+                            const ndef = new NDEFReader();
+                            await ndef.scan();
+                            ndef.addEventListener("reading", ({ serialNumber }) => {
+                                NFCTag_UUID.value = serialNumber;
+                                _currentEditIsHA = /^https?:\/\/(www\.)?home-assistant\.io\/tag\//i.test(serialNumber);
+                                NFCTag_UUID.readOnly = _currentEditIsHA;
+                                console.log("Tag scanned: " + serialNumber + (_currentEditIsHA ? " (Home Assistant)" : ""));
+                                NFCTag_Name.value = Math.random().toString(36).substring(2, 8);
+                            });
+                        } catch (err) {
+                            console.log("NFC scan failed: " + err.message, true);
+                        }
+                    });
+                }
+
+                function loadNFCTags() {
+                    var userId = window.ApiClient?.getCurrentUserId() || "";
+                    fetch('/hmss/nfc/' + userId, { headers: getAuthHeaders() })
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            NFCTag_List.innerHTML = '';
+                            var items = data.Items || [];
+                            if (items.length === 0) {
+                                NFCTag_List.innerHTML = '<p>No NFC tags registered.</p>';
+                                return;
+                            }
+                            items.forEach(function (tag) {
+                                var tagDiv = document.createElement('div');
+                                tagDiv.className = 'listItemBody';
+                                var payload = tag.ActionPayload || {};
+                                var dataStr = '';
+                                if (tag.ActionType === 'play_media' && payload.itemId) dataStr = payload.itemId;
+                                else if (tag.ActionType === 'change_page' && payload.url) dataStr = payload.url;
+
+                                if (tag.TagName === tag.TagId) tag.TagName = Math.random().toString(36).substring(2, 8);
+                                var haBadge = tag.isFromHA ? '<small style="color:#4fc3f7;">[Home Assistant]</small> ' : '';
+                                tagDiv.innerHTML =
+                                    '<div>' +
+                                    '<div>' +
+                                    '<strong>' + haBadge + (tag.TagName || 'Unnamed') + '</strong><br>' +
+                                    '<small>UUID: ' + tag.TagId + '</small><br>' +
+                                    '<small>Action: ' + tag.ActionType + (dataStr ? ' (' + dataStr + ')' : '') + '</small>' +
+                                    '</div>' +
+                                    '<button is="emby-button" class="raised delete-tag" data-tagid="' + tag.TagId + '" style="min-width:auto;padding:5px 12px;">Delete</button>' +
+                                    '<button is="emby-button" class="raised edit-tag" data-tagid="' + tag.TagId + '" style="min-width:auto;padding:5px 12px;">Edit</button>' +
+                                    '</div>';
+                                NFCTag_List.appendChild(tagDiv);
+                            });
+                            NFCTag_List.querySelectorAll('.delete-tag').forEach(function (btn) {
+                                btn.addEventListener('click', function () {
+                                    var tagId = this.getAttribute('data-tagid');
+                                    var userId = window.ApiClient?.getCurrentUserId() || "";
+                                    fetch('/hmss/nfc/' + userId + '/' + encodeURIComponent(tagId), {
+                                        method: 'DELETE',
+                                        headers: getAuthHeaders()
+                                    }).then(function () {
+                                        console.log('Tag removed.');
+                                        loadNFCTags();
+                                    });
+                                });
+                            });
+                            NFCTag_List.querySelectorAll('.edit-tag').forEach(function (btn) {
+                                btn.addEventListener('click', function () {
+                                    var tagId = this.getAttribute('data-tagid');
+                                    var tag = items.find(t => t.TagId === tagId);
+                                    if (tag) {
+                                        _currentEditIsHA = Boolean(tag.isFromHA);
+                                        NFCTag_UUID.value = tag.TagId;
+                                        NFCTag_UUID.readOnly = _currentEditIsHA;
+                                        NFCTag_UUID.style.opacity = _currentEditIsHA ? '0.5' : '1';
+                                        NFCTag_Name.value = tag.TagName || '';
+                                        NFCTag_Description.value = tag.TagDescription || '';
+                                        NFCTag_Action.value = tag.ActionType || 'None';
+                                        NFCTag_Data.value = tag.data || '';
+                                    }
+                                });
+                            });
+                        })
+                        .catch(function (error) {
+                            console.error('Error fetching NFC tags:', error);
+                            NFCTag_List.innerHTML = '<p>Error loading NFC tags.</p>';
+                        });
+                }
+
+                document.querySelector('form').addEventListener('submit', function (e) {
+                    e.preventDefault();
+                    console.log('Saving tag...');
+                    var tagId = NFCTag_UUID.value.trim();
+                    var tagName = NFCTag_Name.value.trim();
+                    var actionType = NFCTag_Action.value;
+                    var tagData = NFCTag_Data.value.trim();
+                    if (!tagId) { console.log('Tag UUID is required.'); return; }
+                    var userId = window.ApiClient?.getCurrentUserId() || "";
+                    fetch('/hmss/nfc/' + userId + '/' + encodeURIComponent(tagId), {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({
+                            TagName: tagName,
+                            TagDescription: NFCTag_Description.value.trim(),
+                            ActionType: actionType,
+                            data: tagData,
+                            isFromHA: _currentEditIsHA
+                        })
+                    }).then(function (r) {
+                        if (r.status === 409) {
+                            console.error('Cannot change UUID of a Home Assistant tag.');
+                            return;
+                        }
+                        return r.json();
+                    }).then(function () {
+                        console.log('Tag saved.');
+                        _currentEditIsHA = false;
+                        NFCTag_UUID.readOnly = false;
+                        NFCTag_UUID.style.opacity = '1';
+                        document.querySelector('form').reset();
+                        loadNFCTags();
+                    });
+                });
+
+                NFCTag_List_Div.querySelector('#NFCTag_Refresh').addEventListener('click', loadNFCTags);
+                loadNFCTags();
+            }
+        </script>
