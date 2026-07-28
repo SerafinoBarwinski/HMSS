@@ -4,9 +4,11 @@ A Jellyfin-compatible media streaming server you can host yourself. Built from t
 ground up in Node.js — no C#, no .NET, no legacy baggage.
 Can also be faster since Express is well optimized.
 
-**Status: Alpha.** Core functionality works — authentication, media browsing,
-metadata enrichment, artwork, and streaming all operational. More features
-coming steadily. Contributions and feedback welcome.
+**Status: Beta.** Core functionality works — authentication, media browsing,
+metadata enrichment, artwork, and streaming all mostly operational. More features
+coming steadily.
+
+Contributions and feedback welcome.
 
 ## Why?
 
