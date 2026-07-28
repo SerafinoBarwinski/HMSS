@@ -46,7 +46,7 @@ npm start
 ```
 
 The server starts on port 8000. Open `http://localhost:8000` in a browser or
-connect with  Jellyfin Mobile / Findroid.
+connect with Jellyfin Mobile / Findroid.
 
 On first start, the Setup Wizard guides you through creating the admin account
 and configuring server settings.
@@ -107,7 +107,8 @@ and posters from TMDB and Fanart.tv.
 
 - Adding remaning APIs
 - Adding remaning API features
-- Tuner discovery
+- Physical Tuner discovery
+- NFC and Automations
 - HMSS-native frontend
 - XMLTV / EPG guide data
 

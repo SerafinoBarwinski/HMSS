@@ -82,6 +82,24 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.sendFile(path.join(__dirname, "../../web/hmss/img/logo.png"));
     });
 
+    // NFC will be implemented in the future.
+    app.get("/hmss/nfc/", (req, res) => {
+        res.status(200).json({ message: 'Not implemented' });
+    });
+
+    app.get("/hmss/nfc/:id", (req, res) => {
+        res.status(200).json({ message: 'Not implemented' });
+    });
+
+    app.post("/hmss/nfc/:id", (req, res) => {
+        res.status(200).json({ message: 'Not implemented' });
+    });
+
+    app.delete("/hmss/nfc/:id", (req, res) => {
+        res.status(200).json({ message: 'Not implemented' });
+    });
+
+
     app.post("/Startup/RemoteAccess", (req, res) => {
         res.status(204).end();
     });

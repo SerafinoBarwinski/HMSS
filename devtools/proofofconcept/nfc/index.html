@@ -1,0 +1,45 @@
+<p id="status">...</p>
+<button id="scanButton">Scan</button>
+<button id="writeButton">Write</button>
+
+<script>
+    const statusElement = document.getElementById('status');
+    const scanButton = document.getElementById('scanButton');
+    const writeButton = document.getElementById('writeButton');
+
+    if (!('NDEFReader' in window)) {
+        statusElement.textContent = 'Web NFC is not supported on this device.';
+        scanButton.disabled = true;
+        writeButton.disabled = true;
+    }
+
+    scanButton.addEventListener('click', async () => {
+        try {
+            const ndef = new NDEFReader();
+            await ndef.scan();
+            statusElement.textContent = 'Scan started. Please bring an NFC tag close to the device.';
+
+            ndef.onreading = event => {
+                const decoder = new TextDecoder();
+                for (const record of event.message.records) {
+                    if (record.recordType === "text") {
+                        const text = decoder.decode(record.data);
+                        statusElement.textContent = `NFC Tag Read: ${text}`;
+                    }
+                }
+            };
+        } catch (error) {
+            statusElement.textContent = `Error: ${error.message}`;
+        }
+    });
+
+    writeButton.addEventListener('click', async () => {
+        try {
+            const ndef = new NDEFReader();
+            await ndef.write("Hello, NFC!");
+            statusElement.textContent = 'NFC Tag Written: Hello, NFC!';
+        } catch (error) {
+            statusElement.textContent = `Error: ${error.message}`;
+        }
+    });
+</script>
