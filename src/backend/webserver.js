@@ -1919,6 +1919,9 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
             return res.end();
         }
 
+        globalThis.__activeDirectPlayStreams = (globalThis.__activeDirectPlayStreams || 0) + 1;
+        res.on("close", () => { globalThis.__activeDirectPlayStreams--; });
+
         const range = req.headers.range;
         if (range) {
             const parts = range.replace(/bytes=/, "").split("-");

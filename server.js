@@ -1,4 +1,5 @@
 import Database from "better-sqlite3"
+import { exec } from "node:child_process"
 import { exit } from "node:process"
 import argon2 from "argon2"
 import figlet from "figlet"
@@ -424,3 +425,27 @@ globalThis.__startMediaIndex = StartMediaIndex;
 globalThis.__refreshEpg = function () { return Promise.resolve(); };
 
 startDiscovery(7359, port);
+
+import cron from "node-cron";
+import * as transcoder from "./src/backend/transcoder.js";
+cron.schedule("0 0 */3 * * *", () => {
+    console.log("[Auto-Update] Checking for updates via git pull...");
+    exec("LANG=en_US.UTF-8 git pull", { cwd: process.cwd() }, (err, stdout, stderr) => {
+        if (err) {
+            console.error("[Auto-Update] git pull failed:", stderr);
+            return;
+        }
+        const output = stdout.trim();
+        console.log("[Auto-Update]", output);
+        if (!output.includes("Updating")) return;
+
+        const transcodeCount = transcoder.getActiveSessions().size;
+        const directPlayCount = globalThis.__activeDirectPlayStreams || 0;
+        if (transcodeCount > 0 || directPlayCount > 0) {
+            console.log(`[Auto-Update] Update available but ${transcodeCount} transcode(s) and ${directPlayCount} direct play(s) active — will restart later.`);
+            return;
+        }
+        console.log("[Auto-Update] No active streams — restarting...");
+        setTimeout(() => process.exit(0), 1000);
+    });
+});
