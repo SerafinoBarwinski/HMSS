@@ -271,6 +271,42 @@ export function telerisingRoutes(app, getDb, serverPort) {
         res.json({ success: true, message: "Telerising stopped." });
     });
 
+    app.get("/telerising/live/:provider/recordings.m3u", (req, res) => {
+        const { provider } = req.params;
+        const settings = readSettings();
+        if (!settings?.accounts?.[provider]) {
+            return res.status(404).json({ error: `Provider '${provider}' not found in settings.` });
+        }
+
+        const upstreamUrl = `http://localhost:${telerisingPort}/api/${provider}/file/recordings.m3u?ffmpeg=true`;
+
+        http.get(upstreamUrl, (upstream) => {
+            let body = "";
+            upstream.on("data", (chunk) => body += chunk);
+            upstream.on("end", () => {
+                if (isTelerisingUnavailable(body)) {
+                    console.log(`[Telerising] Recordings M3U session expired for '${provider}' — refreshing...`);
+                    refreshSession(provider);
+                }
+
+                const host = `${getLocalIp()}:${serverPort}`;
+                const proto = req.protocol || "http";
+                const baseUrl = `${proto}://${host}`;
+
+                const rewritten = body.replace(
+                    /http:\/\/[^\/]+\/api\/([^\/]+)\/live\/([^\/\s]+)/g,
+                    (match, prov, channel) => `${baseUrl}/telerising/live/${prov}/${channel}`
+                );
+
+                res.set("Content-Type", "application/vnd.apple.mpegurl");
+                res.set("Cache-Control", "no-cache");
+                res.send(rewritten);
+            });
+        }).on("error", (err) => {
+            res.status(502).json({ error: "Failed to reach Telerising.", detail: err.message });
+        });
+    });
+
     app.get("/telerising/live/:provider/channels.m3u", (req, res) => {
         const { provider } = req.params;
         const settings = readSettings();

@@ -2885,31 +2885,69 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         ]);
     });
 
-    app.get('/LiveTv/Tuners/Discover', (req, res) => { /* Add auto discover of Telerising */
+    function m3uReachable(url) {
+        return new Promise((resolve) => {
+            const req = http.get(url, { timeout: 5000 }, (res) => {
+                resolve(res.statusCode === 200);
+                res.resume();
+            });
+            req.on("error", () => resolve(false));
+            req.setTimeout(5000, () => { req.destroy(); resolve(false); });
+        });
+    }
+
+    app.get('/LiveTv/Tuners/Discover', async (req, res) => { /* Add auto discover of Telerising */
         if (!req.user) return res.status(401).end();
         const accounts = telerising.listActiveProvider();
         const localIp = telerising.getLocalIp();
         const entries = [];
         if (accounts && typeof accounts === 'object') {
-            for (const [provider, info] of Object.entries(accounts)) {
-                entries.push({
-                    "Id": provider,
-                    "Url": `http://${localIp}:${telerising.telerisingPort}/api/${provider}/file/channels.m3u`,
-                    "Type": "m3u",
-                    "DeviceId": "",
-                    "FriendlyName": "Telerising " + provider,
-                    "ImportFavoritesOnly": false,
-                    "AllowHWTranscoding": false,
-                    "AllowFmp4TranscodingContainer": false,
-                    "AllowStreamSharing": false,
-                    "FallbackMaxStreamingBitrate": 0,
-                    "EnableStreamLooping": false,
-                    "Source": "Telerising",
-                    "TunerCount": 0,
-                    "UserAgent": "",
-                    "IgnoreDts": true,
-                    "ReadAtNativeFramerate": true
-                });
+            for (const [provider] of Object.entries(accounts)) {
+                const chUrl = `http://${localIp}:${telerising.telerisingPort}/api/${provider}/file/channels.m3u`;
+                const recUrl = `http://${localIp}:${telerising.telerisingPort}/api/${provider}/file/recordings.m3u`;
+
+                const [chOk, recOk] = await Promise.all([m3uReachable(chUrl), m3uReachable(recUrl)]);
+
+                if (chOk) {
+                    entries.push({
+                        "Id": provider,
+                        "Url": chUrl,
+                        "Type": "m3u",
+                        "DeviceId": "",
+                        "FriendlyName": "Telerising " + provider,
+                        "ImportFavoritesOnly": false,
+                        "AllowHWTranscoding": false,
+                        "AllowFmp4TranscodingContainer": false,
+                        "AllowStreamSharing": false,
+                        "FallbackMaxStreamingBitrate": 0,
+                        "EnableStreamLooping": false,
+                        "Source": "Telerising",
+                        "TunerCount": 0,
+                        "UserAgent": "",
+                        "IgnoreDts": true,
+                        "ReadAtNativeFramerate": true
+                    });
+                }
+                if (recOk) {
+                    entries.push({
+                        "Id": provider + "_recordings",
+                        "Url": recUrl,
+                        "Type": "m3u",
+                        "DeviceId": "",
+                        "FriendlyName": "Telerising " + provider + " Recordings",
+                        "ImportFavoritesOnly": false,
+                        "AllowHWTranscoding": false,
+                        "AllowFmp4TranscodingContainer": false,
+                        "AllowStreamSharing": false,
+                        "FallbackMaxStreamingBitrate": 0,
+                        "EnableStreamLooping": false,
+                        "Source": "Telerising",
+                        "TunerCount": 0,
+                        "UserAgent": "",
+                        "IgnoreDts": true,
+                        "ReadAtNativeFramerate": true
+                    });
+                }
             }
         }
         res.json(entries);
