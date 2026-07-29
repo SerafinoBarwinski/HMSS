@@ -2438,7 +2438,16 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
                 }
                 let body = "";
                 res.on("data", (c) => body += c);
-                res.on("end", () => resolve(body));
+                res.on("end", () => {
+                    if (telerising.isTelerisingUnavailable(body)) {
+                        const m = url.match(/\/api\/([^/]+)\//);
+                        if (m) {
+                            console.log(`[Telerising] fetchM3U session expired for '${m[1]}' — refreshing...`);
+                            telerising.refreshSession(m[1]);
+                        }
+                    }
+                    resolve(body);
+                });
             }).on("error", reject);
         });
     }

@@ -78,8 +78,8 @@ export async function init(rootPsw, db, argon2) {
     try { db.exec("ALTER TABLE system ADD COLUMN telerising_autostart BOOLEAN default true"); } catch {}
     try { db.exec("ALTER TABLE users ADD COLUMN policy_json TEXT"); } catch {}
 
-    // clear stale sessions on restart
-    db.exec("DELETE FROM sessions");
+    // clear sessions older than 3 days
+    db.exec("DELETE FROM sessions WHERE created_at < datetime('now', '-3 days')");
 
     // no root user auto-creation — first user is created via startup wizard
 
@@ -325,12 +325,18 @@ export function validateToken(token, db) {
     if (!token || !db) return null;
 
     const session = db.prepare(`
-        SELECT users.* FROM sessions
+        SELECT users.*, sessions.created_at AS session_created FROM sessions
         JOIN users ON users.id = sessions.user_id
         WHERE sessions.token = ?
     `).get(token);
 
     if (!session) return null;
+
+    const ageMs = Date.now() - new Date(session.session_created + "Z").getTime();
+    if (ageMs > 3 * 24 * 60 * 60 * 1000) {
+        db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+        return null;
+    }
 
     return {
         id: String(session.id),

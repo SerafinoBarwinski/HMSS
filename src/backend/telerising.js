@@ -284,6 +284,11 @@ export function telerisingRoutes(app, getDb, serverPort) {
             let body = "";
             upstream.on("data", (chunk) => body += chunk);
             upstream.on("end", () => {
+                if (isTelerisingUnavailable(body)) {
+                    console.log(`[Telerising] M3U session expired for '${provider}' — refreshing...`);
+                    refreshSession(provider);
+                }
+
                 const host = `${getLocalIp()}:${serverPort}`;
                 const proto = req.protocol || "http";
                 const baseUrl = `${proto}://${host}`;
@@ -318,6 +323,11 @@ export function telerisingRoutes(app, getDb, serverPort) {
                 let body = "";
                 upstream.on("data", (chunk) => body += chunk);
                 upstream.on("end", () => {
+                    if (isTelerisingUnavailable(body)) {
+                        console.log(`[Telerising] Channel stream session expired for '${provider}' — refreshing...`);
+                        refreshSession(provider);
+                    }
+
                     const host = `${getLocalIp()}:${serverPort}`;
                     const proto = req.protocol || "http";
                     const baseUrl = `${proto}://${host}`;
@@ -372,6 +382,77 @@ export function startTelerisingIfAutostart(db) {
         console.log("Telerising process exited with code " + code);
         telerisingProcess = null;
     });
+}
+
+let telerisingCookies = "";
+
+function telerisingLogin() {
+    return new Promise((resolve) => {
+        const settings = readSettings();
+        const password = settings?.basic?.password;
+        if (!password) { resolve(false); return; }
+
+        const data = `pw=${encodeURIComponent(password)}`;
+        const req = http.request({
+            hostname: "localhost", port: telerisingPort, path: "/api/login_check", method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(data) },
+        }, (res) => {
+            let body = "";
+            res.on("data", (c) => body += c);
+            res.on("end", () => {
+                const cookies = res.headers["set-cookie"];
+                if (cookies) telerisingCookies = cookies.join("; ");
+                const ok = body.includes('"success": true');
+                console.log(`[Telerising] Login ${ok ? "succeeded" : "failed"}`);
+                resolve(ok);
+            });
+        });
+        req.on("error", () => resolve(false));
+        req.write(data);
+        req.end();
+    });
+}
+
+export async function refreshSession(provider) {
+    if (!telerisingCookies) await telerisingLogin();
+
+    const postData = `id=${provider}`;
+    const req = http.request({
+        hostname: "localhost", port: telerisingPort, path: "/api/session", method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData),
+            "Cookie": telerisingCookies,
+        },
+    }, (res) => {
+        let body = "";
+        res.on("data", (c) => body += c);
+        res.on("end", () => {
+            if (body.includes('"success": true')) {
+                console.log(`[Telerising] Session refresh for '${provider}' succeeded`);
+            } else if (body.includes("Invalid Session ID")) {
+                console.log(`[Telerising] Session expired, re-logging in...`);
+                telerisingCookies = "";
+                telerisingLogin().then(() => {
+                    const retry = http.request({
+                        hostname: "localhost", port: telerisingPort, path: "/api/session", method: "POST",
+                        headers: {
+                            "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData),
+                            "Cookie": telerisingCookies,
+                        },
+                    });
+                    retry.write(postData);
+                    retry.end();
+                });
+            }
+        });
+    });
+    req.on("error", () => {});
+    req.write(postData);
+    req.end();
+}
+
+export function isTelerisingUnavailable(body) {
+    return typeof body === "string" && body.includes("Live TV is unavailable in this setup");
 }
 
 export function listActiveProvider() {
