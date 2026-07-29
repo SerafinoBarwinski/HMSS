@@ -75,7 +75,7 @@ export async function init(rootPsw, db, argon2) {
         db.prepare("UPDATE users SET uuid = ? WHERE id = ?").run(randomUUID(), row.id);
     }
 
-    try { db.exec("ALTER TABLE system ADD COLUMN telerising_autostart BOOLEAN default false"); } catch {}
+    try { db.exec("ALTER TABLE system ADD COLUMN telerising_autostart BOOLEAN default true"); } catch {}
     try { db.exec("ALTER TABLE users ADD COLUMN policy_json TEXT"); } catch {}
 
     // clear stale sessions on restart
