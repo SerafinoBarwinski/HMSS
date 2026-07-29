@@ -43,6 +43,14 @@ var DEBUG_TEA_POT = false;
 var DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = true;
 
 var is_server_ready = false;
+var ServerUptime = 0;
+
+export {
+    DEBUG_LOG_EVERY_REQUEST,
+    DEBUG_LOG_EVERY_WEBSCKT,
+    DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG,
+    is_server_ready, ServerUptime
+}
 
 const args = process.argv.slice(2);
 
@@ -110,7 +118,7 @@ console.log(figlet.textSync("\nHMSS", {
 
 
 const addonConfig = {};
-const addons = await addonLoader.loadAddons(addonConfig);
+export const addons = await addonLoader.loadAddons(addonConfig);
 
 export async function StartMediaIndex() {
     console.log("The indexer has started. This may take a while...")
@@ -226,7 +234,7 @@ app.use("/web", express.static("web"));
 
 const server = app.listen(port, "0.0.0.0", async () => {
     console.log(`HMSS listening on port ${port}`);
-    
+
     startTelerisingIfAutostart(db);
 
     try {
@@ -412,5 +420,7 @@ function parsePeriodic(msg, callback) {
 globalThis.__wsSendToAll = sendToAllClients;
 globalThis.__wsSendToUser = sendToUser;
 
-startDiscovery(7359, port);
+globalThis.__startMediaIndex = StartMediaIndex;
+globalThis.__refreshEpg = function () { return Promise.resolve(); };
 
+startDiscovery(7359, port);

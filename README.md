@@ -1,28 +1,27 @@
 # HMSS — Home Media Streaming Service
 
-A Jellyfin-compatible media streaming server you can host yourself. Built from the
-ground up in Node.js — no C#, no .NET, no legacy baggage.
-Can also be faster since Express is well optimized.
+A Jellyfin-compatible media streaming server you can host yourself. Built from
+the ground up in Node.js — no C#, no .NET, no legacy baggage.
+Resource-efficient and fast — runs comfortably on minimal hardware.
 
-**Status: Beta.** Core functionality works — authentication, media browsing,
-metadata enrichment, artwork, and streaming all mostly operational. More features
-coming steadily.
-
-Contributions and feedback welcome.
+**State of Development:** Beta — core features are working, but there's still
+room for polish and expansion. Contributions and feedback welcome.
 
 ## Why?
 
-Running your own media server is awesome. But existing solutions can be
-frustrating — they're often hard to set up, opaque when things go wrong, or
-slow to fix issues that matter to self-hosters.
+Running your own media server is great, but existing solutions can be
+frustrating — hard to set up, opaque when things go wrong, or slow to fix
+issues that matter to self-hosters.
 
-HMSS takes a different approach: a fresh codebase in Node.js, designed to be
-easy to read, easy to modify, and easy to run. It speaks the Jellyfin API so
-your favourite clients (Jellyfin Mobile, Findroid, etc) just work — but
-the server itself is diffrent from top to bottom.
+HMSS takes a different approach: a clean, modern Node.js codebase designed to
+be easy to read, easy to modify, and easy to run. It speaks the Jellyfin API
+so your favorite clients (Jellyfin Mobile, Findroid, etc.) just work — but the
+server itself is different from top to bottom. Beyond compatibility, HMSS also
+aims to introduce new features that extend the usual ecosystem.
 
 ## Requirements
 
+- **Hardware Minimum:** 1 CPU core, 1 GB RAM, 1 GB storage
 - **Node.js** 20 or later
 - **ffmpeg** in your PATH
 - **TMDB API Key** (free at [themoviedb.org](https://www.themoviedb.org/settings/api))
@@ -34,9 +33,10 @@ That's it. No Docker required (but it runs fine in one).
 
 - **[Telerising API](https://github.com/sunsettrack4/telerising-api)** — LiveTV
   integration. Provides IPTV channel streaming through various providers.
-  Place the ZIP Content at `src/telerising` and configure via the web dashboard.
+  Place the ZIP content in `src/telerising` and configure via the web dashboard.
   Then under **Live TV → Tuner Hosts** (type: M3U, URL:
   `http://localhost:5000/api/{provider}/live/channels.m3u?ffmpeg=true`).
+  Once set up, Telerising is also automatically discovered as a tuner by HMSS.
 
 ## Quick Start
 
@@ -56,23 +56,19 @@ and configuring server settings.
 ## Override Arguments
 
 #### Common
-- --debug: *Ensure there is more logging.*
-- --port: *Changes the Web Server Port*
+- `--debug`: Enables verbose logging
+- `--port`: Changes the web server port
 
-#### Made for Devs:
-- --fail-integrity-check: *Causes the integrity check to fail, even if all conditions are met. May be useful for debugging the integrity check.*
-- --skip-integrity-check: *Ensures the integrity check succeeds, even if not all conditions are met. **This can lead to unpredictable errors!***
-- --i-am-a-tea-pot: *No Coffee for you*
+#### Development
+- `--fail-integrity-check`: Forces the integrity check to fail, even if all
+  conditions are met. Useful for debugging the integrity check itself.
+- `--skip-integrity-check`: Skips the integrity check. **Can lead to
+  unpredictable errors!**
+- `--i-am-a-tea-pot`: No coffee today
 
 ## Addons
-I am implementing my own add-on system.
-Four modules are included out of the box:
-- TMDB: Metadata
-  *Needs Config*
-- Musicbrainz: Music Metadata
-  *Needs Config*
-- fanart.tv: Artwork
-- Crunchyroll: Artwork
+
+HMSS features a built-in add-on system. See `src/addons` for available plugins.
 
 ## Media Setup
 
@@ -91,52 +87,50 @@ and posters from TMDB and Fanart.tv.
 
 ## What Works
 
-- **Authentication**: Password login, Quick Connect, Setup Wizard, sessions
-- **Media Browsing**: Full Jellyfin-compatible item listing, filtering, suggestions
-- **Media Playback**: Direct play streaming with Range support (seeking works)
-- **Live TV**: Telerising IPTV integration — channel listing, HLS proxy streaming, channel logos
-- **Metadata Enrichment**: TMDB (movies/shows), MusicBrainz (music), Fanart.tv (artwork)
-- **Addons**: Plugin system with config UI in Jellyfin Web Dashboard
-- **Media Scanning**: Threaded background scanning with metadata extraction (ffprobe)
-- **jellyfin-web**: Full web UI hosted, works with Jellyfin Mobile app
-- **Discovery**: UDP on port 7359, WebSocket for real-time updates
-- **Localization**: Languages, cultures, countries served from API
-- **System Info**: Server info, ping, logging, activity log, disk stats
-- **Rate Limiting**: Per-IP request throttling, localhost exempt
-- **Spam Protection**: Configurable IP-based request limiting
+Most of the core Jellyfin experience is functional: authentication (password,
+Quick Connect, sessions), media browsing with most filtering and suggestions,
+direct-play streaming with seeking support, Live TV via Telerising IPTV
+(channel listing, HLS proxy, EPG), metadata enrichment from TMDB, MusicBrainz,
+and Fanart.tv, a plugin/addon system, threaded background media scanning,
+and the full Jellyfin Web UI. Discovery (UDP, WebSocket), localization, system
+info, rate limiting, and spam protection are all working too.
 
-## New Implementions into Jellyfin
-- NFC: NFC Based Automation
-- Telsering: Automatic Telsering Discovery as an Tuner
+**What's still missing or limited:** Per-user permissions are currently basic
+— only admin and regular user roles exist. Real physical tuner discovery,
+Schedules Direct integration, and IPTV recording functionality are not yet
+implemented. A few minor bugs exist here and there, but nothing that should
+get in the way of everyday use.
+
+## New Implementations in Jellyfin
+
+- **NFC**: NFC-based automation
+- **Telerising**: Automatic Telerising discovery as a tuner
 
 ## What's Next
 
-- Adding remaning APIs
-- Adding remaning API features
-- Physical Tuner discovery
-- NFC and Automations
+- Remaining API endpoints and features
+- Physical tuner discovery
+- Schedules Direct integration *(Maybe. Is anyone actually using it?)*
+- Recording support
+- Automations
 - HMSS-native frontend
-- XMLTV / EPG guide data
 
-## How *you* could help me
-I would be happy if you contributed to the project.
-Can you design a logo or give me some feedback?
-An XML file from an SDDP would also be helpful!
+## How You Can Help
+
+Contributions are welcome! If you'd like to help:
+- Design a logo
+- Provide feedback
+- Share an SDDP XML file
 
 ## API Compatibility
 
 HMSS implements a large subset of the Jellyfin API. Most endpoints used by
-Jellyfin Mobile, and other clients are functional. Not Every API works 100% especially so early.
+Jellyfin Mobile, Findroid, and other clients are functional. Not every API
+works perfectly, especially this early in development.
 
-
-**HMSS is not affiliated with or endorsed by the Jellyfin project. We implement
-API compatibility to leverage the existing ecosystem of clients.**
+**HMSS is not affiliated with or endorsed by the Jellyfin project. API
+compatibility is implemented to leverage the existing ecosystem of clients.**
 
 ## License
 
 GPL v2 — see [LICENSE](LICENSE).
-
-## Medias
-*Looks like regular Jellyfin* but is faster
-
-I removed them because i changed a lost since these Screenshots were taken.

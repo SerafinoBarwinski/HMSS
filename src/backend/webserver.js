@@ -16,6 +16,7 @@ import https from "node:https";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import zlib from "node:zlib";
 import { imageSize } from "image-size";
 import { fileURLToPath } from "node:url";
 
@@ -2524,17 +2525,9 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
         if (!provider || !provider.Path) return [];
         try {
-            var resp = await fetch(provider.Path);
-            if (!resp.ok) return [];
-            var buf = await resp.arrayBuffer();
-            var raw = new Uint8Array(buf);
-            var text;
-            if (raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b) {
-                var zlib = await import("node:zlib");
-                text = zlib.gunzipSync(Buffer.from(raw)).toString("utf-8");
-            } else {
-                text = new TextDecoder("utf-8", { fatal: false }).decode(raw);
-            }
+            var raw = await _fetchFeed(provider.Path);
+            if (!raw) return [];
+            var text = raw.toString("utf-8");
             text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
             var firstLt = text.indexOf("<");
             if (firstLt > 0) text = text.substring(firstLt);
@@ -2746,6 +2739,22 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         res.json(config.ListingProviders || []);
     });
 
+    app.get('/LiveTv/ListingProviders/:providerId/Xml', async (req, res) => {
+        // is public endpoint, no auth check
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const provider = config.ListingProviders.find(p => p.Id === req.params.providerId);
+        if (!provider || !provider.Path) return res.status(404).json({ error: "Provider or path not found." });
+        try {
+            var xml = await _fetchFeed(provider.Path);
+            if (!xml) return res.status(502).json({ error: "Failed to fetch XMLTV feed." });
+            res.set("Content-Type", "application/xml");
+            res.send(xml);
+        } catch (e) {
+            res.status(502).json({ error: "XMLTV fetch error: " + e.message });
+        }
+    });
+
     app.get('/LiveTv/ListingProviders/Default', (req, res) => {
         if (!req.user) return res.status(401).end();
         res.json({ Type: "Disabled" });
@@ -2894,14 +2903,256 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         res.json(entries);
     });
 
-    app.get('/LiveTv/Programs', (req, res) => {
+    app.get('/LiveTv/Programs', async (req, res) => {
         if (!req.user) return res.status(401).end();
-        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        var provider = (config.ListingProviders || [])[0];
+        if (!provider) return res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+        var requestedIds = req.query.channelIds ? req.query.channelIds.split(",").filter(Boolean) : [];
+        var maxStart = req.query.MaxStartDate ? new Date(req.query.MaxStartDate).getTime() : Infinity;
+        var minEnd = req.query.MinEndDate ? new Date(req.query.MinEndDate).getTime() : 0;
+        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd);
+        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
-    app.post('/LiveTv/Programs', (req, res) => {
+let _epgCache = { programmes: [], ts: 0, providerId: "" };
+
+function _nextPk(buf, start) {
+    for (var i = start; i < buf.length - 4; i++) {
+        if (buf[i] === 0x50 && buf[i+1] === 0x4b) {
+            var tag = buf[i+2] << 8 | buf[i+3];
+            if (tag === 0x0304 || tag === 0x0102 || tag === 0x0506) return i;
+        }
+    }
+    return -1;
+}
+
+function _parseZipEntry(buf) {
+    if (buf.length < 30) return null;
+    var sig = buf.readUInt32LE(0);
+    if (sig !== 0x04034b50) return null;
+    var flags = buf.readUInt16LE(6);
+    var method = buf.readUInt16LE(8);
+    var hasDataDesc = !!(flags & 8);
+    var compSize = buf.readUInt32LE(18);
+    var uncompSize = buf.readUInt32LE(22);
+    var fnameLen = buf.readUInt16LE(26);
+    var extraLen = buf.readUInt16LE(28);
+    var hdrSize = 30 + fnameLen + extraLen;
+    var fileName = buf.slice(30, 30 + fnameLen).toString("utf-8").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
+    var dataStart = hdrSize, dataEnd;
+    if (!hasDataDesc && compSize > 0) {
+        dataEnd = dataStart + compSize;
+    } else {
+        var next = _nextPk(buf, hdrSize + 2);
+        dataEnd = next > 0 ? next : buf.length;
+    }
+    if (dataEnd > buf.length) dataEnd = buf.length;
+    if (dataEnd <= dataStart) return null;
+    var raw = buf.slice(dataStart, dataEnd);
+    if (method === 0) return { data: raw, name: fileName, comp: raw.length, uncomp: raw.length };
+    if (method === 8) {
+        try {
+            var dec = zlib.inflateRawSync(raw, { maxOutputLength: 209715200 });
+            return { data: dec, name: fileName, comp: raw.length, uncomp: dec.length };
+        } catch (e) { return null; }
+    }
+    return null;
+}
+
+function _parseTarEntry(buf, offset) {
+    if (offset + 512 > buf.length) return null;
+    var name = buf.slice(offset, offset + 100).toString("utf-8").replace(/\0.*$/, "");
+    if (!name) return null;
+    var sizeStr = buf.slice(offset + 124, offset + 136).toString("utf-8").replace(/\0.*$/, "").trim();
+    var size = parseInt(sizeStr, 8);
+    if (isNaN(size) || size < 0 || offset + 512 + size > buf.length) return null;
+    var data = buf.slice(offset + 512, offset + 512 + size);
+    var padded = (size + 511) & ~511;
+    return { data, name, nextOffset: offset + 512 + padded };
+}
+
+function _decompressBuffer(buf, depth) {
+    if (buf.length < 4) return buf;
+    if (depth > 3) return null;
+    if (buf.length > 209715200) return null;
+    if (buf[0] === 0x1f && buf[1] === 0x8b) {
+        try {
+            var dec = zlib.gunzipSync(buf, { maxOutputLength: 209715200 });
+            return _decompressBuffer(dec, depth + 1);
+        } catch (e) { return buf; }
+    }
+    if (buf[0] === 0x78 && (buf[1] === 0x01 || buf[1] === 0x9c || buf[1] === 0xda)) {
+        try {
+            var dec = zlib.inflateSync(buf, { maxOutputLength: 209715200 });
+            return _decompressBuffer(dec, depth + 1);
+        } catch (e) { return buf; }
+    }
+    if (buf[0] === 0x1f && buf[1] === 0x9d) {
+        try {
+            var dec = zlib.unzipSync(buf, { maxOutputLength: 209715200 });
+            return _decompressBuffer(dec, depth + 1);
+        } catch (e) { return buf; }
+    }
+    if (buf[0] >= 0x10 && buf[0] <= 0x1f && buf[1] >= 0x00 && buf[1] <= 0x08) return buf;
+    if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
+        var off = 0;
+        while (off < buf.length) {
+            var entry = _parseZipEntry(buf.slice(off));
+            if (!entry) break;
+            var entryHdr = 30 + buf.readUInt16LE(off + 26) + buf.readUInt16LE(off + 28);
+            var entryFull = entryHdr + entry.comp;
+            if (!entry.name || entry.name.startsWith(".") || entry.name.startsWith("__MACOSX")) { off += entryFull; continue; }
+            if (entry.comp > 0 && entry.uncomp > 0 && entry.uncomp / entry.comp > 500) return null;
+            return _decompressBuffer(entry.data, depth + 1);
+        }
+        return buf;
+    }
+    return buf;
+}
+
+async function _fetchFeed(url) {
+    var resp = await fetch(url);
+    if (!resp.ok) return null;
+    var buf = Buffer.from(await resp.arrayBuffer());
+    if (!buf.length) return null;
+    var decompressed = _decompressBuffer(buf, 0);
+    if (!decompressed || !decompressed.length) return null;
+    if (decompressed.length > 209715200) return null;
+    return decompressed;
+}
+
+function _parseXmltvDate(str) {
+    if (!str) return null;
+    var m = str.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{2})(\d{2})$/);
+    if (!m) return new Date(str).toISOString();
+    var offsetHours = parseInt(m[7]), offsetMins = parseInt(m[8]);
+    var sign = offsetHours < 0 ? "-" : "+";
+    var absH = Math.abs(offsetHours);
+    var tz = sign + String(absH).padStart(2, "0") + ":" + String(offsetMins).padStart(2, "0");
+    return m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":" + m[6] + tz;
+}
+
+function _xmltvTicks(startStr, stopStr) {
+    if (!startStr || !stopStr) return 0;
+    var s = new Date(_parseXmltvDate(startStr)).getTime();
+    var e = new Date(_parseXmltvDate(stopStr)).getTime();
+    if (isNaN(s) || isNaN(e)) return 0;
+    return (e - s) * 10000;
+}
+
+async function _fetchEpgProgrammes(config, providerId) {
+    if (_epgCache.providerId === providerId && Date.now() - _epgCache.ts < 300000 && _epgCache.programmes.length > 0) {
+        return _epgCache.programmes;
+    }
+    var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
+    if (!provider || !provider.Path) return [];
+    try {
+        var raw = await _fetchFeed(provider.Path);
+        if (!raw) return [];
+        var text = raw.toString("utf-8");
+        text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
+        var firstLt = text.indexOf("<");
+        if (firstLt > 0) text = text.substring(firstLt);
+        text = text.replace(/<\?xml[\s\S]*?\?>/g, "").replace(/<!DOCTYPE[\s\S]*?>/g, "").trim();
+        if (text.charAt(0) !== "<") return [];
+        var { SaxesParser } = await import("saxes");
+        var parser = new SaxesParser({ lowercase: true });
+        var programmes = [];
+        var currentProgramme = null;
+        parser.on("opentag", function (node) {
+            if (node.name === "programme") {
+                currentProgramme = {
+                    channel: node.attributes.channel || "",
+                    start: node.attributes.start || "",
+                    stop: node.attributes.stop || "",
+                };
+            } else if (currentProgramme) {
+                if (node.name === "title" && !currentProgramme.title) currentProgramme._cap = "title";
+                else if (node.name === "sub-title" && !currentProgramme.subtitle) currentProgramme._cap = "subtitle";
+                else if (node.name === "date" && !currentProgramme.date) currentProgramme._cap = "date";
+                else if (node.name === "category" && !currentProgramme.category) currentProgramme._cap = "category";
+                else currentProgramme._cap = null;
+            }
+        });
+        parser.on("text", function (txt) {
+            if (currentProgramme && currentProgramme._cap) {
+                if (!currentProgramme[currentProgramme._cap]) currentProgramme[currentProgramme._cap] = "";
+                currentProgramme[currentProgramme._cap] += txt;
+            }
+        });
+        parser.on("cdata", function (txt) {
+            if (currentProgramme && currentProgramme._cap) {
+                if (!currentProgramme[currentProgramme._cap]) currentProgramme[currentProgramme._cap] = "";
+                currentProgramme[currentProgramme._cap] += txt;
+            }
+        });
+        parser.on("closetag", function (node) {
+            if (!currentProgramme) return;
+            if (node.name === "programme") {
+                programmes.push(currentProgramme);
+                currentProgramme = null;
+            } else {
+                currentProgramme._cap = null;
+            }
+        });
+        parser.write(text).close();
+        _epgCache = { programmes, ts: Date.now(), providerId };
+        return programmes;
+    } catch (e) {
+        console.error("EPG fetch error:", e);
+        return [];
+    }
+}
+
+async function _queryEpg(config, provider, requestedIds, maxStart, minEnd) {
+    if (!provider) return [];
+    var xmltvToTuner = {};
+    (config.ChannelMappings || []).forEach(function (m) {
+        if (m.ProviderId === provider.Id && m.ProviderChannelId && m.TunerChannelId) {
+            xmltvToTuner[m.ProviderChannelId] = m.TunerChannelId;
+        }
+    });
+    var programmes = await _fetchEpgProgrammes(config, provider.Id);
+    var items = [], seen = {};
+    for (var i = 0; i < programmes.length; i++) {
+        var p = programmes[i];
+        var channelId = xmltvToTuner[p.channel];
+        if (!channelId) continue;
+        if (requestedIds.length > 0 && !requestedIds.includes(channelId)) continue;
+        var startDate = _parseXmltvDate(p.start);
+        var endDate = _parseXmltvDate(p.stop);
+        if (!startDate || !endDate) continue;
+        var startMs = new Date(startDate).getTime();
+        var endMs = new Date(endDate).getTime();
+        if (isNaN(startMs) || isNaN(endMs)) continue;
+        if (endMs < minEnd || startMs > maxStart) continue;
+        var name = p.title || "Unknown";
+        var id = generateItemId(name + p.channel + p.start);
+        if (seen[id]) continue;
+        seen[id] = true;
+        var item = { Id: id, Name: name, ServerId: "hmss", ChannelId: channelId, Type: "Program", MediaType: "Unknown", StartDate: startDate, EndDate: endDate, RunTimeTicks: _xmltvTicks(p.start, p.stop), ImageBlurHashes: {} };
+        if (p.subtitle) item.EpisodeTitle = p.subtitle;
+        if (p.date) { var year = parseInt(p.date); if (!isNaN(year) && year > 1900 && year < 2100) item.ProductionYear = year; }
+        if (p.category) { var cat = p.category.toLowerCase(); if (cat === "series" || cat === "serie" || cat.includes("series") || cat.includes("serie")) item.IsSeries = true; else if (cat === "movie" || cat.includes("movie") || cat.includes("film")) item.IsMovie = true; else if (cat === "news" || cat.includes("news")) item.IsNews = true; else if (cat === "sports" || cat.includes("sport")) item.IsSports = true; else if (cat === "kids" || cat.includes("kids") || cat.includes("children")) item.IsKids = true; }
+        items.push(item);
+    }
+    items.sort(function (a, b) { return new Date(a.StartDate).getTime() - new Date(b.StartDate).getTime(); });
+    return items;
+}
+
+    app.post('/LiveTv/Programs', async (req, res) => {
         if (!req.user) return res.status(401).end();
-        res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        var provider = (config.ListingProviders || [])[0];
+        var body = req.body || {};
+        var requestedIds = body.channelIds ? body.channelIds.split(",").filter(Boolean) : [];
+        var maxStart = body.MaxStartDate ? new Date(body.MaxStartDate).getTime() : Infinity;
+        var minEnd = body.MinEndDate ? new Date(body.MinEndDate).getTime() : 0;
+        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd);
+        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
     app.get('/LiveTv/Programs/Recommended', (req, res) => {
@@ -3261,45 +3512,119 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     // === RemoteImage ===
     app.post('/Items/:itemId/RemoteImages/Download', (req, res) => { /* DownloadRemoteImage */ res.status(200).json({ message: 'Not implemented' }); });
 
-    // === ScheduledTask ===
+// === ScheduledTask ===
+    globalThis.__scheduledTasks = globalThis.__scheduledTasks || [];
+    function _taskState(task) {
+        var running = globalThis.__scheduledTasks.find(function (t) { return t.id === task.id && t.running; });
+        return running ? "Running" : "Idle";
+    }
+    function _toTaskJson(task) {
+        var lastRun = task.lastRun || { start: new Date(0).toISOString(), end: new Date(0).toISOString(), status: "Completed" };
+        return {
+            Name: task.name,
+            State: _taskState(task),
+            Id: task.id,
+            LastExecutionResult: {
+                StartTimeUtc: lastRun.start,
+                EndTimeUtc: lastRun.end,
+                Status: lastRun.status,
+                Name: task.name,
+                Key: task.key,
+                Id: task.id
+            },
+            Triggers: task.triggers || [],
+            Description: task.description,
+            Category: task.category,
+            IsHidden: !!task.hidden,
+            Key: task.key
+        };
+    }
+    globalThis.registerScheduledTask = function (opts) {
+        var id = generateItemId(opts.name);
+        if (globalThis.__scheduledTasks.find(function (t) { return t.id === id; })) return id;
+        var task = { id: id, name: opts.name, key: opts.key || opts.name, description: opts.description || "", category: opts.category || "General", triggers: opts.triggers || [], hidden: opts.hidden, fn: opts.execute, running: false, lastRun: null };
+        globalThis.__scheduledTasks.push(task);
+        if (opts.cron) {
+            (async function () {
+                var cron = await import("node-cron");
+                cron.schedule(opts.cron, function () {
+                    var t = globalThis.__scheduledTasks.find(function (x) { return x.id === id; });
+                    if (!t || t.running) return;
+                    t.running = true;
+                    var start = new Date().toISOString();
+                    (async function () { try { await t.fn(); t.lastRun = { start: start, end: new Date().toISOString(), status: "Completed" }; } catch (e) { t.lastRun = { start: start, end: new Date().toISOString(), status: "Failed" }; console.error("Task " + t.name + " failed:", e); } finally { t.running = false; } })();
+                });
+            })();
+        }
+        return id;
+    };
+    globalThis.triggerTask = function (id) {
+        var t = globalThis.__scheduledTasks.find(function (x) { return x.id === id; });
+        if (!t || t.running) return false;
+        t.running = true;
+        var start = new Date().toISOString();
+        (async function () { try { await t.fn(); t.lastRun = { start: start, end: new Date().toISOString(), status: "Completed" }; } catch (e) { t.lastRun = { start: start, end: new Date().toISOString(), status: "Failed" }; console.error("Task " + t.name + " failed:", e); } finally { t.running = false; } })();
+        return true;
+    };
+
     app.get('/ScheduledTasks', (req, res) => {
         if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
-        res.json([
-            {
-                "Name": "Scan Media Library",
-                "State": "Idle",
-                "Id": "7738148ffcd07979c7ceb148e06b3aed",
-                "LastExecutionResult": {
-                    "StartTimeUtc": "2026-07-25T19:10:57.8381968Z",
-                    "EndTimeUtc": "2026-07-25T19:11:05.0696788Z",
-                    "Status": "Completed",
-                    "Name": "Scan Media Library",
-                    "Key": "RefreshLibrary",
-                    "Id": "7738148ffcd07979c7ceb148e06b3aed"
-                },
-                "Triggers": [
-                    {
-                        "Type": "IntervalTrigger",
-                        "IntervalTicks": 432000000000
-                    }
-                ],
-                "Description": "Scans your media library for new files and refreshes metadata.",
-                "Category": "Library",
-                "IsHidden": false,
-                "Key": "RefreshLibrary"
-            }]);
+        res.json(globalThis.__scheduledTasks.map(_toTaskJson));
     });
-    app.delete('/ScheduledTasks/Running/:taskId', (req, res) => { /* StopTask */ res.status(204).json({ message: 'Not implemented' }); });
+    app.get('/ScheduledTasks/:taskId', (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
+        var t = globalThis.__scheduledTasks.find(function (x) { return x.id === req.params.taskId; });
+        if (!t) return res.status(404).json({ error: "Task not found" });
+        res.json(_toTaskJson(t));
+    });
     app.post('/ScheduledTasks/Running/:taskId', (req, res) => {
-        const taskId = req.params.taskId;
-        switch (taskId) {
-            case "7738148ffcd07979c7ceb148e06b3aed":
-                server.StartMediaIndex()
-        }
-        res.status(200).json({ message: 'Not implemented' });
+        if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
+        var ok = globalThis.triggerTask(req.params.taskId);
+        res.status(ok ? 200 : 204)
     });
-    app.get('/ScheduledTasks/:taskId', (req, res) => { /* GetTask */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/ScheduledTasks/:taskId/Triggers', (req, res) => { res.status(200); });
+    app.delete('/ScheduledTasks/Running/:taskId', (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
+        var t = globalThis.__scheduledTasks.find(function (x) { return x.id === req.params.taskId; });
+        if (t) t.running = false;
+        res.status(204).json({});
+    });
+    app.post('/ScheduledTasks/:taskId/Triggers', (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
+        var t = globalThis.__scheduledTasks.find(function (x) { return x.id === req.params.taskId; });
+        if (t && req.body) t.triggers = req.body;
+        res.status(204).end();
+    });
+
+    // Register built-in tasks
+    if (!globalThis.__scheduledTasks.length) {
+        var nextTick = process.nextTick || setImmediate;
+        nextTick(function () {
+            globalThis.registerScheduledTask({
+                name: "Scan Media Library",
+                key: "RefreshLibrary",
+                description: "Scans your media library for new files and refreshes metadata.",
+                category: "Library",
+                cron: "0 0 * * * *",
+                triggers: [{ Type: "IntervalTrigger", IntervalTicks: 36000000000 }],
+                execute: function () {
+                    if (typeof globalThis.__startMediaIndex === "function") return globalThis.__startMediaIndex();
+                    return Promise.resolve();
+                }
+            });
+            globalThis.registerScheduledTask({
+                name: "Refresh EPG Data",
+                key: "RefreshEpg",
+                description: "Refreshes EPG (Electronic Program Guide) data from configured listing providers.",
+                category: "Live TV",
+                cron: "0 0 */24 * * *",
+                triggers: [{ Type: "IntervalTrigger", IntervalTicks: 864000000000 }],
+                execute: function () {
+                    if (typeof globalThis.__refreshEpg === "function") return globalThis.__refreshEpg();
+                    return Promise.resolve();
+                }
+            });
+        });
+    }
 
     // === Search ===
     app.get('/Search/Hints', (req, res) => { /* GetSearchHints */ res.status(200).json({ message: 'Not implemented' }); });
