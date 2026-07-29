@@ -1,5 +1,9 @@
 *node_modules*
+!web/*node_modules*
 *.db
+*.db-shm
+*.db-wal
+!src/addons/crunchyroll/crunchyroll.db
 *.log
 *stream_tmp*
 /media/*
