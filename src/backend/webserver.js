@@ -1681,11 +1681,11 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             var startDate = _parseXmltvDate(p.start);
             var endDate = _parseXmltvDate(p.stop);
             var pName = p.title || "Unknown";
-            var id = generateItemId(pName + p.channel + p.start);
+            var progId = generateItemId(pName + p.channel + p.start);
             var userDataKey = "Program-" + pName + (p.subtitle || "");
             var item = {
-                Name: pName, ServerId: serverId, Id: id,
-                Etag: id, DateCreated: startDate,
+                Name: pName, ServerId: serverId, Id: progId,
+                Etag: progId, DateCreated: startDate,
                 CanDelete: false, CanDownload: false,
                 SortName: pName.toLowerCase().replace(/\s+/g, ""),
                 ExternalUrls: [], EnableMediaSourceDisplay: true,
@@ -1700,7 +1700,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 Type: "Program", People: [], Studios: [],
                 GenreItems: p.category ? [{ Name: p.category, Id: generateItemId(p.category) }] : [],
                 LocalTrailerCount: 0,
-                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: userDataKey, ItemId: id },
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: userDataKey, ItemId: progId },
                 SpecialFeatureCount: 0,
                 DisplayPreferencesId: "8cab5e5f60ae4830c47f6431bbe4c3cb",
                 Tags: ["Series"],
