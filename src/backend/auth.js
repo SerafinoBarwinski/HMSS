@@ -411,7 +411,7 @@ export function hmssAuthRoutes(app, getDb) {
     app.post("/Users/:userId/Images/Primary", (req, res) => {
         if (!req.user) return res.status(401).end();
         const userId = req.params.userId;
-        const isSelf = req.user.id === userId || req.user.uuid === userId;
+        const isSelf = req.user.id === userId || req.user.uuid.replace(/-/g, "") === userId.replace(/-/g, "");
         if (!isSelf && req.user.perms < 2) {
             return res.status(403).end();
         }
