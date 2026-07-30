@@ -412,7 +412,7 @@ export function hmssAuthRoutes(app, getDb) {
         if (!req.user) return res.status(401).end();
         const userId = req.params.userId;
         const isSelf = req.user.id === userId || req.user.uuid.replace(/-/g, "") === userId.replace(/-/g, "");
-        if (!isSelf && req.user.perms < 2) {
+        if (!isSelf && !req.user.perms < 2) {
             return res.status(403).end();
         }
         handleUpload(req, res, userId);
@@ -427,7 +427,7 @@ export function hmssAuthRoutes(app, getDb) {
 
             // Jellyfin sends images as base64-encoded text — decode if needed
             const head = buffer.slice(0, Math.min(100, buffer.length)).toString("utf-8", 0, Math.min(100, buffer.length));
-            if (head.startsWith("/9j/") || head.startsWith("iVBOR") || head.includes("base64,")) {
+            if (head.startsWith("/9j/") || head.startsWith("iVBOR") || head.startsWith("UklGR") || head.startsWith("R0lGOD") || head.includes("base64,")) {
                 const b64 = head.includes("base64,") ? head.split("base64,")[1] : buffer.toString("utf-8");
                 buffer = Buffer.from(b64.replace(/\s/g, ""), "base64");
             }
