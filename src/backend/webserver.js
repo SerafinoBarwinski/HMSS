@@ -3631,6 +3631,12 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         const item = await findItemForPlayback(req);
         if (!item) return res.status(404).json({ error: "Item not found." });
         var audioIdx = parseInt(req.body?.AudioStreamIndex ?? req.query.AudioStreamIndex) || null;
+        if (audioIdx != null) {
+            var uid = req.user?.id || req.body?.UserId || req.query.userId || "default";
+            if (!globalThis.__audioSelections) globalThis.__audioSelections = {};
+            if (!globalThis.__audioSelections[uid]) globalThis.__audioSelections[uid] = {};
+            globalThis.__audioSelections[uid][req.params.itemId] = audioIdx;
+        }
         if (item.tvChannel) {
             return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel, audioIdx)));
         }
@@ -4306,6 +4312,10 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
     app.get('/Videos/:itemId/hls/master.m3u8', async (req, res) => {
         try {
             var audioStreamIndex = parseInt(req.query.AudioStreamIndex) || null;
+            if (audioStreamIndex == null) {
+                var uid = req.user?.id || req.query.userId || "default";
+                audioStreamIndex = globalThis.__audioSelections?.[uid]?.[req.params.itemId] || null;
+            }
             const result = await startHlsTranscode(req.params.itemId, audioStreamIndex);
             if (!result) return res.status(404).json({ error: "Item not found." });
             const baseUrl = `/Videos/${req.params.itemId}/hls`;
