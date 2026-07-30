@@ -3451,10 +3451,11 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         return { found, itemPath, itemType, probe };
     }
 
-    function buildMediaSource(found, itemPath, id, probe, itemType, disableDirectPlay = false) {
+    function buildMediaSource(found, itemPath, id, probe, itemType, disableDirectPlay = false, audioStreamIndex) {
         if (!probe) return null;
         const isVideo = itemType === "Episode" || itemType === "Movie" || itemType === "Video";
         const transcodeUrl = `/Videos/${id}/hls/master.m3u8`;
+        var defaultAudioIdx = audioStreamIndex != null ? audioStreamIndex : (probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null);
         return {
             Protocol: "File",
             Id: id,
@@ -3476,14 +3477,14 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
             VideoType: isVideo ? "VideoFile" : undefined,
             MediaStreams: probe.streams,
             Bitrate: probe.bitrate,
-            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null,
+            DefaultAudioStreamIndex: defaultAudioIdx,
             HasSegments: false,
             ETag: id,
             PlaySessionId: crypto.randomUUID(),
         };
     }
 
-    function buildLiveTvMediaSource(tvChannel) {
+    function buildLiveTvMediaSource(tvChannel, audioStreamIndex) {
         const ch = tvChannel.MediaSources[0];
         const liveStreamId = crypto.createHash("md5").update(ch.Id + Date.now()).digest("hex");
         return {
@@ -3579,7 +3580,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
             },
             TranscodingSubProtocol: "http",
             AnalyzeDurationMs: 3000,
-            DefaultAudioStreamIndex: 1,
+            DefaultAudioStreamIndex: audioStreamIndex != null ? audioStreamIndex : 1,
             HasSegments: false,
         };
     }
@@ -3617,19 +3618,21 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
     app.get('/Items/:itemId/PlaybackInfo', async (req, res) => {
         const item = await findItemForPlayback(req);
         if (!item) return res.status(404).json({ error: "Item not found." });
+        var audioIdx = parseInt(req.query.AudioStreamIndex) || null;
         if (item.tvChannel) {
-            return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel)));
+            return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel, audioIdx)));
         }
         const id = generateItemId(item.found.id || item.found.filePath);
-        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType);
+        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, false, audioIdx);
         res.json(buildPlaybackInfoResponse(mediaSource));
     });
 
     app.post('/Items/:itemId/PlaybackInfo', async (req, res) => {
         const item = await findItemForPlayback(req);
         if (!item) return res.status(404).json({ error: "Item not found." });
+        var audioIdx = parseInt(req.body?.AudioStreamIndex) || null;
         if (item.tvChannel) {
-            return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel)));
+            return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel, audioIdx)));
         }
         const id = generateItemId(item.found.id || item.found.filePath);
         const deviceProfile = req.body?.DeviceProfile || null;
@@ -3637,7 +3640,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         if (deviceProfile && item.probe?.streams?.length) {
             disableDirectPlay = !clientCanDirectPlay(deviceProfile, item.probe.streams);
         }
-        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, disableDirectPlay);
+        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, disableDirectPlay, audioIdx);
         res.json(buildPlaybackInfoResponse(mediaSource));
     });
     app.post('/LiveStreams/Close', (req, res) => { /* CloseLiveStream */ res.status(200).json({ message: 'Not implemented' }); });
