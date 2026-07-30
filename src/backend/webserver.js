@@ -2954,12 +2954,13 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         const config = getLiveTvConfig(db);
         var provider = (config.ListingProviders || [])[0];
         if (!provider) return res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
-        var requestedIds = req.query.channelIds ? req.query.channelIds.split(",").filter(Boolean) : [];
+        var requestedIds = (req.query.ChannelIds || req.query.channelIds || "").split(",").filter(Boolean);
         var maxStart = req.query.MaxStartDate ? new Date(req.query.MaxStartDate).getTime() : Infinity;
         var minEnd = req.query.MinEndDate ? new Date(req.query.MinEndDate).getTime() : 0;
         var tvChannels = await getLiveTvChannels(db);
         var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels);
-        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
+        var limit = parseInt(req.query.Limit || req.query.limit) || 0;
+        res.json({ Items: limit > 0 ? items.slice(0, limit) : items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
 let _epgCache = { programmes: [], ts: 0, providerId: "" };
@@ -3206,7 +3207,8 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         var minEnd = body.MinEndDate ? new Date(body.MinEndDate).getTime() : 0;
         var tvChannels = await getLiveTvChannels(db);
         var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels);
-        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
+        var limit = parseInt(body.Limit || body.limit) || 0;
+        res.json({ Items: limit > 0 ? items.slice(0, limit) : items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
     app.get('/LiveTv/Programs/Recommended', (req, res) => {
@@ -3214,9 +3216,66 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
     });
 
-    app.get('/LiveTv/Programs/:programId', (req, res) => {
+    app.get('/LiveTv/Programs/:programId', async (req, res) => {
         if (!req.user) return res.status(401).end();
-        res.status(404).json({ error: "Program not found." });
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        var provider = (config.ListingProviders || [])[0];
+        if (!provider) return res.status(404).json({ error: "Program not found." });
+        var programmes = await _fetchEpgProgrammes(config, provider.Id);
+        var p = null;
+        for (var i = 0; i < programmes.length; i++) {
+            var cand = programmes[i];
+            var name = cand.title || "Unknown";
+            var candId = generateItemId(name + cand.channel + cand.start);
+            if (candId === req.params.programId) { p = cand; break; }
+        }
+        if (!p) return res.status(404).json({ error: "Program not found." });
+        var tvChannels = await getLiveTvChannels(db);
+        var tunerByTvgId = {}, tunerByChId = {};
+        for (var ci = 0; ci < tvChannels.length; ci++) {
+            if (tvChannels[ci].TvgId) tunerByTvgId[tvChannels[ci].TvgId] = tvChannels[ci];
+            tunerByChId[tvChannels[ci].Id] = tvChannels[ci];
+        }
+        var chId = null;
+        (config.ChannelMappings || []).forEach(function (m) {
+            if (m.ProviderId === provider.Id && m.ProviderChannelId === p.channel) chId = m.TunerChannelId;
+        });
+        if (!chId && tunerByTvgId[p.channel]) chId = tunerByTvgId[p.channel].Id;
+        var ch = chId ? tunerByChId[chId] : null;
+        var startDate = _parseXmltvDate(p.start);
+        var endDate = _parseXmltvDate(p.stop);
+        var name = p.title || "Unknown";
+        var id = generateItemId(name + p.channel + p.start);
+        var item = {
+            Name: name, ServerId: "hmss", Id: id,
+            Etag: id, DateCreated: startDate,
+            CanDelete: false, CanDownload: false,
+            SortName: name.toLowerCase().replace(/\s+/g, ""),
+            ExternalUrls: [], EnableMediaSourceDisplay: true,
+            ChannelId: chId || "", ChannelName: ch ? ch.Name : "",
+            Overview: p.subtitle || "",
+            Taglines: [], Genres: p.category ? [p.category] : [],
+            RunTimeTicks: _xmltvTicks(p.start, p.stop),
+            PlayAccess: "Full", ProductionYear: p.date ? parseInt(p.date) : null,
+            ChannelNumber: ch ? ch.Number : "",
+            RemoteTrailers: [], ProviderIds: {},
+            ParentId: chId || "",
+            Type: "Program", People: [], Studios: [],
+            GenreItems: p.category ? [{ Name: p.category, Id: generateItemId(p.category) }] : [],
+            LocalTrailerCount: 0,
+            UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: id, ItemId: id },
+            SpecialFeatureCount: 0,
+            DisplayPreferencesId: generateItemId("dp_" + (chId || "")),
+            Tags: [],
+            ImageTags: {}, BackdropImageTags: [], ImageBlurHashes: {},
+            MediaType: "Video",
+            EndDate: endDate, LockedFields: [], LockData: false,
+            StartDate: startDate,
+        };
+        if (p.date) { var year = parseInt(p.date); if (!isNaN(year) && year > 1900 && year < 2100) item.ProductionYear = year; }
+        if (ch && ch.LogoUrl) { item.ImageTags.Primary = ch.Id; item.PrimaryImageAspectRatio = 1.333; }
+        res.json(item);
     });
 
     app.get('/LiveTv/Recordings', (req, res) => {
