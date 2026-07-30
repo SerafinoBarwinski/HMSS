@@ -3630,7 +3630,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
     app.post('/Items/:itemId/PlaybackInfo', async (req, res) => {
         const item = await findItemForPlayback(req);
         if (!item) return res.status(404).json({ error: "Item not found." });
-        var audioIdx = parseInt(req.body?.AudioStreamIndex) || null;
+        var audioIdx = parseInt(req.body?.AudioStreamIndex ?? req.query.AudioStreamIndex) || null;
         if (item.tvChannel) {
             return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel, audioIdx)));
         }
