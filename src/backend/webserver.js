@@ -2394,10 +2394,8 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
                         Name: ch.name,
                         ServerId: serverId,
                         Id: ch.id,
+                        TvgId: ch.tvgId || "",
                         SortName: ch.name.toLowerCase(),
-                        Number: String(ch.chno || 0),
-                        ChannelNumber: String(ch.chno || 0),
-                        ChannelType: "TV",
                         IsFolder: false,
                         Type: "TvChannel",
                         LocationType: "Remote",
@@ -2632,53 +2630,50 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         });
 
         if (mappings.length === 0 && providerChannels.length > 0 && tunerChannels.length > 0) {
-            var allMappingsEmpty = !(config.ChannelMappings || []).length;
-            if (allMappingsEmpty) {
-                var pMap = {};
-                var countryPrefixRe = /^([a-z]{2})\s*-\s+/;
-                providerChannels.forEach(function (pc) {
-                    var key = pc.Name.toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
-                    if (!pMap[key]) pMap[key] = [];
-                    pMap[key].push(pc);
-                    var tldMatch = pc.Name.match(/\.[a-z]{2,}$/i);
-                    if (tldMatch) {
-                        var keyNoTld = key.replace(/\.[a-z]{2,}$/i, "").trim();
-                        if (keyNoTld && keyNoTld !== key) {
-                            if (!pMap[keyNoTld]) pMap[keyNoTld] = [];
-                            pMap[keyNoTld].push(pc);
-                        }
+            var pMap = {};
+            var countryPrefixRe = /^([a-z]{2})\s*-\s+/;
+            providerChannels.forEach(function (pc) {
+                var key = pc.Name.toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
+                if (!pMap[key]) pMap[key] = [];
+                pMap[key].push(pc);
+                var tldMatch = pc.Name.match(/\.[a-z]{2,}$/i);
+                if (tldMatch) {
+                    var keyNoTld = key.replace(/\.[a-z]{2,}$/i, "").trim();
+                    if (keyNoTld && keyNoTld !== key) {
+                        if (!pMap[keyNoTld]) pMap[keyNoTld] = [];
+                        pMap[keyNoTld].push(pc);
                     }
-                    var prefixMatch = key.match(countryPrefixRe);
-                    if (prefixMatch) {
-                        var keyNoPrefix = key.replace(countryPrefixRe, "").trim();
-                        if (keyNoPrefix && keyNoPrefix !== key) {
-                            if (!pMap[keyNoPrefix]) pMap[keyNoPrefix] = [];
-                            pMap[keyNoPrefix].push(pc);
-                        }
+                }
+                var prefixMatch = key.match(countryPrefixRe);
+                if (prefixMatch) {
+                    var keyNoPrefix = key.replace(countryPrefixRe, "").trim();
+                    if (keyNoPrefix && keyNoPrefix !== key) {
+                        if (!pMap[keyNoPrefix]) pMap[keyNoPrefix] = [];
+                        pMap[keyNoPrefix].push(pc);
                     }
-                });
+                }
+            });
 
-                mappings = tunerChannels.map(function (tc) {
-                    var key = tc.Name.toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
-                    var matches = pMap[key] || [];
-                    if (matches.length >= 1) {
-                        return { Name: tc.Id, Value: matches[0].Id };
-                    }
-                    for (var si = 0; si < _countryNames.length; si++) {
-                        var suffix = _countryNames[si];
-                        if (key.length > suffix.length && key.indexOf(suffix, key.length - suffix.length) !== -1) {
-                            var keyStripped = key.substring(0, key.length - suffix.length).trim();
-                            if (keyStripped) {
-                                matches = pMap[keyStripped] || [];
-                                if (matches.length >= 1) {
-                                    return { Name: tc.Id, Value: matches[0].Id };
-                                }
+            mappings = tunerChannels.map(function (tc) {
+                var key = tc.Name.toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
+                var matches = pMap[key] || [];
+                if (matches.length >= 1) {
+                    return { Name: tc.Id, Value: matches[0].Id };
+                }
+                for (var si = 0; si < _countryNames.length; si++) {
+                    var suffix = _countryNames[si];
+                    if (key.length > suffix.length && key.indexOf(suffix, key.length - suffix.length) !== -1) {
+                        var keyStripped = key.substring(0, key.length - suffix.length).trim();
+                        if (keyStripped) {
+                            matches = pMap[keyStripped] || [];
+                            if (matches.length >= 1) {
+                                return { Name: tc.Id, Value: matches[0].Id };
                             }
                         }
                     }
-                    return null;
-                }).filter(Boolean);
-            }
+                }
+                return null;
+            }).filter(Boolean);
         }
 
         var pLookup = {};
@@ -2962,7 +2957,8 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         var requestedIds = req.query.channelIds ? req.query.channelIds.split(",").filter(Boolean) : [];
         var maxStart = req.query.MaxStartDate ? new Date(req.query.MaxStartDate).getTime() : Infinity;
         var minEnd = req.query.MinEndDate ? new Date(req.query.MinEndDate).getTime() : 0;
-        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd);
+        var tvChannels = await getLiveTvChannels(db);
+        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels);
         res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
@@ -3156,7 +3152,7 @@ async function _fetchEpgProgrammes(config, providerId) {
     }
 }
 
-async function _queryEpg(config, provider, requestedIds, maxStart, minEnd) {
+async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tunerChannels) {
     if (!provider) return [];
     var xmltvToTuner = {};
     (config.ChannelMappings || []).forEach(function (m) {
@@ -3166,9 +3162,16 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd) {
     });
     var programmes = await _fetchEpgProgrammes(config, provider.Id);
     var items = [], seen = {};
+    var tunerByTvgId = {};
+    if (Object.keys(xmltvToTuner).length === 0 && tunerChannels) {
+        for (var ci = 0; ci < tunerChannels.length; ci++) {
+            if (tunerChannels[ci].TvgId) tunerByTvgId[tunerChannels[ci].TvgId] = tunerChannels[ci].Id;
+        }
+    }
     for (var i = 0; i < programmes.length; i++) {
         var p = programmes[i];
         var channelId = xmltvToTuner[p.channel];
+        if (!channelId) channelId = tunerByTvgId[p.channel];
         if (!channelId) continue;
         if (requestedIds.length > 0 && !requestedIds.includes(channelId)) continue;
         var startDate = _parseXmltvDate(p.start);
@@ -3201,7 +3204,8 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd) {
         var requestedIds = body.channelIds ? body.channelIds.split(",").filter(Boolean) : [];
         var maxStart = body.MaxStartDate ? new Date(body.MaxStartDate).getTime() : Infinity;
         var minEnd = body.MinEndDate ? new Date(body.MinEndDate).getTime() : 0;
-        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd);
+        var tvChannels = await getLiveTvChannels(db);
+        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels);
         res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
