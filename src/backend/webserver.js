@@ -1974,6 +1974,42 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         const filePath = findFileByItemId(itemId);
         if (!filePath) return res.status(404).json({ error: "Item not found." });
 
+        var uid = req.user?.id || req.query.userId || req.query.api_key || "default";
+        var selectedAudio = parseInt(req.query.AudioStreamIndex) || null;
+        if (selectedAudio == null)
+            selectedAudio = globalThis.__audioSelections?.[uid]?.[itemId?.replace(/-/g, "")] || null;
+
+        if (selectedAudio != null) {
+            try {
+                var probe = await probeMedia(filePath);
+                var audioStreams = (probe?.streams || []).filter(s => s.Type === "Audio");
+                var ffmpegAudioIdx = -1;
+                for (var si = 0; si < audioStreams.length; si++) {
+                    var realIdx = probe.streams.indexOf(audioStreams[si]);
+                    if (realIdx === selectedAudio) { ffmpegAudioIdx = si; break; }
+                }
+                if (ffmpegAudioIdx >= 0) {
+                    var ext = filePath.split(".").pop().toLowerCase();
+                    var container = ext === "mkv" ? "matroska" : "mp4";
+                    var mp4Flags = container === "mp4" ? ["-movflags", "frag_keyframe+empty_moov"] : [];
+                    var args = ["-hide_banner", "-loglevel", "warning", "-i", filePath,
+                        "-map", "0:v:0", "-map", "0:a:" + ffmpegAudioIdx,
+                        "-c:v", "copy", "-c:a", "copy",
+                        ...mp4Flags, "-f", container, "pipe:1"];
+                    var proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+                    var mime = container === "matroska" ? "video/x-matroska" : "video/mp4";
+                    if (req.method === "HEAD") {
+                        proc.kill();
+                        return res.writeHead(200, { "Content-Type": mime }).end();
+                    }
+                    res.writeHead(200, { "Content-Type": mime });
+                    proc.stdout.pipe(res);
+                    proc.on("error", function () { if (!res.headersSent) res.status(500).end(); });
+                    return;
+                }
+            } catch (_) {}
+        }
+
         let stat;
         try { stat = statSync(filePath); } catch { return res.status(404).json({ error: "File not found." }); }
 
@@ -3635,7 +3671,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
             var uid = req.user?.id || req.body?.UserId || req.query.userId || "default";
             if (!globalThis.__audioSelections) globalThis.__audioSelections = {};
             if (!globalThis.__audioSelections[uid]) globalThis.__audioSelections[uid] = {};
-            globalThis.__audioSelections[uid][req.params.itemId] = audioIdx;
+            globalThis.__audioSelections[uid][req.params.itemId.replace(/-/g, "")] = audioIdx;
         }
         if (item.tvChannel) {
             return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel, audioIdx)));
@@ -4314,7 +4350,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
             var audioStreamIndex = parseInt(req.query.AudioStreamIndex) || null;
             if (audioStreamIndex == null) {
                 var uid = req.user?.id || req.query.userId || "default";
-                audioStreamIndex = globalThis.__audioSelections?.[uid]?.[req.params.itemId] || null;
+                audioStreamIndex = globalThis.__audioSelections?.[uid]?.[req.params.itemId.replace(/-/g, "")] || null;
             }
             const result = await startHlsTranscode(req.params.itemId, audioStreamIndex);
             if (!result) return res.status(404).json({ error: "Item not found." });
