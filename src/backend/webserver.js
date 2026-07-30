@@ -1989,8 +1989,8 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
                     if (realIdx === selectedAudio) { ffmpegAudioIdx = si; break; }
                 }
                 if (ffmpegAudioIdx >= 0) {
-                    var ext = filePath.split(".").pop().toLowerCase();
-                    var container = ext === "mkv" ? "matroska" : "mp4";
+                    var rxExt = filePath.split(".").pop().toLowerCase();
+                    var container = rxExt === "mkv" ? "matroska" : "mp4";
                     var mp4Flags = container === "mp4" ? ["-movflags", "frag_keyframe+empty_moov"] : [];
                     var args = ["-hide_banner", "-loglevel", "warning", "-i", filePath,
                         "-map", "0:v:0", "-map", "0:a:" + ffmpegAudioIdx,
