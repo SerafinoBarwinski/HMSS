@@ -1,5 +1,41 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
+import { readFileSync } from "node:fs";
+
+var _langMap = null;
+function getLangMap() {
+    if (_langMap) return _langMap;
+    _langMap = {};
+    var locByCode = {};
+    try {
+        var localization = JSON.parse(readFileSync(new URL("./localization.json", import.meta.url), "utf-8"));
+        for (var i = 0; i < localization.length; i++) {
+            var loc = localization[i];
+            if (loc.Value) {
+                var v = loc.Value.toLowerCase();
+                locByCode[v] = loc.Name;
+                locByCode[v.split("-")[0]] = loc.Name;
+            }
+        }
+    } catch (_) {}
+    try {
+        var cultures = JSON.parse(readFileSync(new URL("./cultures.json", import.meta.url), "utf-8"));
+        for (var i = 0; i < cultures.length; i++) {
+            var c = cultures[i];
+            var two = c.TwoLetterISOLanguageName ? c.TwoLetterISOLanguageName.toLowerCase() : null;
+            var names = c.ThreeLetterISOLanguageNames || [c.ThreeLetterISOLanguageName];
+            for (var j = 0; j < names.length; j++) {
+                var key = names[j].toLowerCase();
+                if (locByCode[two || key]) _langMap[key] = locByCode[two || key];
+                else if (!(key in _langMap)) _langMap[key] = c.DisplayName;
+            }
+            if (two) {
+                if (!(two in _langMap)) _langMap[two] = locByCode[two] || c.DisplayName;
+            }
+        }
+    } catch (_) {}
+    return _langMap;
+}
 
 export function probeMedia(filePath) {
     return new Promise((resolve, reject) => {
@@ -87,8 +123,10 @@ export function probeMedia(filePath) {
 
 function buildDisplayTitle(s) {
     if (s.codec_type === "audio") {
-        const ch = s.channels === 2 ? "Stereo" : s.channels === 1 ? "Mono" : s.channels + "ch";
-        return `${s.codec_name?.toUpperCase()} - ${ch} - Default`;
+        var chLabel = s.channels === 1 ? "Mono" : s.channels === 2 ? "Stereo" : s.channels === 6 ? "5.1" : s.channels === 8 ? "7.1" : s.channels === 3 ? "2.1" : s.channels === 4 ? "4.0" : s.channels + "ch";
+        var langCode = (s.tags?.language || s.language || "").toLowerCase();
+        var langName = getLangMap()[langCode] || langCode;
+        return langName ? langName + " - " + chLabel : chLabel;
     }
     if (s.codec_type === "video") {
         const h = s.height || 0;

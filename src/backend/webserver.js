@@ -3551,7 +3551,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
                     AudioSpatialFormat: "None",
                     LocalizedDefault: "Default",
                     LocalizedExternal: "External",
-                    DisplayTitle: "AAC - Stereo - Default",
+                    DisplayTitle: "Stereo",
                     IsInterlaced: false,
                     IsAVC: false,
                     ChannelLayout: "stereo",
