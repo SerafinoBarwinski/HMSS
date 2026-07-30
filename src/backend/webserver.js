@@ -1648,6 +1648,73 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 });
             }
         }
+        // check if it's a LiveTV programme (EPG)
+        if (!found) {
+            try {
+                var epgConfig = getLiveTvConfig(db);
+                var epgProvider = (epgConfig.ListingProviders || [])[0];
+                if (epgProvider) {
+                    var epgProgrammes = await _fetchEpgProgrammes(epgConfig, epgProvider.Id);
+                    for (var pi = 0; pi < epgProgrammes.length; pi++) {
+                        var p = epgProgrammes[pi];
+                        var pName = p.title || "Unknown";
+                        var pId = generateItemId(pName + p.channel + p.start);
+                        if (pId === rawId) { found = p; itemType = "Program"; break; }
+                    }
+                }
+            } catch (_) {}
+        }
+        if (found && itemType === "Program") {
+            var p = found;
+            var tvChannels = await getLiveTvChannels(db);
+            var tunerByTvgId = {}, tunerByChId = {};
+            for (var ci = 0; ci < tvChannels.length; ci++) {
+                if (tvChannels[ci].TvgId) tunerByTvgId[tvChannels[ci].TvgId] = tvChannels[ci];
+                tunerByChId[tvChannels[ci].Id] = tvChannels[ci];
+            }
+            var chId = null;
+            (epgConfig.ChannelMappings || []).forEach(function (m) {
+                if (m.ProviderId === epgProvider.Id && m.ProviderChannelId === p.channel) chId = m.TunerChannelId;
+            });
+            if (!chId && tunerByTvgId[p.channel]) chId = tunerByTvgId[p.channel].Id;
+            var ch = chId ? tunerByChId[chId] : null;
+            var startDate = _parseXmltvDate(p.start);
+            var endDate = _parseXmltvDate(p.stop);
+            var pName = p.title || "Unknown";
+            var id = generateItemId(pName + p.channel + p.start);
+            var userDataKey = "Program-" + pName + (p.subtitle || "");
+            var item = {
+                Name: pName, ServerId: serverId, Id: id,
+                Etag: id, DateCreated: startDate,
+                CanDelete: false, CanDownload: false,
+                SortName: pName.toLowerCase().replace(/\s+/g, ""),
+                ExternalUrls: [], EnableMediaSourceDisplay: true,
+                ChannelId: chId || "", ChannelName: ch ? ch.Name : "",
+                Overview: p.subtitle || "",
+                Taglines: [], Genres: p.category ? [p.category] : [],
+                RunTimeTicks: _xmltvTicks(p.start, p.stop),
+                PlayAccess: "Full", ProductionYear: p.date ? parseInt(p.date) : null,
+                ChannelNumber: ch ? ch.Number : "",
+                RemoteTrailers: [], ProviderIds: {},
+                ParentId: chId || "",
+                Type: "Program", People: [], Studios: [],
+                GenreItems: p.category ? [{ Name: p.category, Id: generateItemId(p.category) }] : [],
+                LocalTrailerCount: 0,
+                UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: userDataKey, ItemId: id },
+                SpecialFeatureCount: 0,
+                DisplayPreferencesId: "8cab5e5f60ae4830c47f6431bbe4c3cb",
+                Tags: ["Series"],
+                ImageTags: {}, BackdropImageTags: [], ImageBlurHashes: {},
+                MediaType: "Video",
+                EndDate: endDate, LockedFields: [], LockData: false,
+                StartDate: startDate,
+                IsSeries: true,
+                EpisodeTitle: p.subtitle || "",
+            };
+            if (p.date) { var year = parseInt(p.date); if (!isNaN(year) && year > 1900 && year < 2100) item.ProductionYear = year; }
+            if (ch && ch.LogoUrl) { item.ImageTags.Primary = ch.Id; item.PrimaryImageAspectRatio = 1.333; item.ChannelPrimaryImageTag = ch.Id; }
+            return res.json(item);
+        }
         // check if it's a season folder
         if (!found && index.shows?.length > 0) {
             for (const ep of index.shows) {
