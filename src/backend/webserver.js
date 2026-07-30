@@ -4281,7 +4281,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
     // === HLS Transcoding ===
     const hlsSessions = new Map();
 
-    async function startHlsTranscode(itemId) {
+    async function startHlsTranscode(itemId, audioStreamIndex) {
         const rawId = (itemId || "").replace(/-/g, "");
         const filePath = findFileByItemId(rawId);
         if (!filePath) return null;
@@ -4289,7 +4289,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         let probe = null;
         try { probe = await probeMedia(filePath); } catch {}
 
-        const existingKey = `${rawId}`;
+        const existingKey = `${rawId}-a${audioStreamIndex != null ? audioStreamIndex : "0"}`;
         if (hlsSessions.has(existingKey)) {
             const existing = hlsSessions.get(existingKey);
             if (existing.session && !existing.session.process.killed) {
@@ -4298,14 +4298,15 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
             hlsSessions.delete(existingKey);
         }
 
-        const session = await transcoder.startTranscode(filePath, probe);
+        const session = await transcoder.startTranscode(filePath, probe, audioStreamIndex);
         hlsSessions.set(existingKey, { session, itemId: rawId, createdAt: Date.now() });
         return { sessionId: session.id };
     }
 
     app.get('/Videos/:itemId/hls/master.m3u8', async (req, res) => {
         try {
-            const result = await startHlsTranscode(req.params.itemId);
+            var audioStreamIndex = parseInt(req.query.AudioStreamIndex) || null;
+            const result = await startHlsTranscode(req.params.itemId, audioStreamIndex);
             if (!result) return res.status(404).json({ error: "Item not found." });
             const baseUrl = `/Videos/${req.params.itemId}/hls`;
             const master = [

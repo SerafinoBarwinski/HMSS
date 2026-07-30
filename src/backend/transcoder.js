@@ -46,14 +46,12 @@ function needsTranscoding(probe) {
     return { videoNeeded, audioNeeded, needed: videoNeeded || audioNeeded };
 }
 
-async function buildFfmpegArgs(sourceFile, outputDir, probe) {
+async function buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex) {
     const args = ["-hide_banner", "-loglevel", "warning"];
     args.push("-i", sourceFile);
 
     const videoStream = probe?.streams?.find(s => s.Type === "Video");
-    const audioStream = probe?.streams?.find(s => s.Type === "Audio");
     const videoNeed = videoStream ? needsVideoTranscoding(videoStream.Codec) : false;
-    const audioNeed = audioStream ? needsAudioTranscoding(audioStream.Codec) : false;
 
     if (videoNeed) {
         const encoder = await pickBestVideoEncoder();
@@ -67,14 +65,28 @@ async function buildFfmpegArgs(sourceFile, outputDir, probe) {
         args.push("-c:v", "copy");
     }
 
-    if (audioNeed) {
-        const encoder = await pickBestAudioEncoder();
-        args.push(...getAudioEncoderArgs(encoder));
-    } else if (audioStream) {
-        args.push("-c:a", "copy");
+    var audioIdx = audioStreamIndex != null ? audioStreamIndex : (probe?.streams?.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null);
+    if (audioIdx != null && probe?.streams?.[audioIdx]?.Type === "Audio") {
+        args.push("-map", "0:v:0", "-map", "0:a:" + (probe.streams.filter(s => s.Type === "Audio").indexOf(probe.streams[audioIdx])));
+        var audioStream = probe.streams[audioIdx];
+        if (needsAudioTranscoding(audioStream.Codec)) {
+            const encoder = await pickBestAudioEncoder();
+            args.push(...getAudioEncoderArgs(encoder));
+        } else {
+            args.push("-c:a", "copy");
+        }
     } else {
-        const encoder = await pickBestAudioEncoder();
-        args.push(...getAudioEncoderArgs(encoder));
+        args.push("-map", "0:v:0");
+        var firstAudio = probe?.streams?.find(s => s.Type === "Audio");
+        if (firstAudio) {
+            args.push("-map", "0:a:0");
+            if (needsAudioTranscoding(firstAudio.Codec)) {
+                const encoder = await pickBestAudioEncoder();
+                args.push(...getAudioEncoderArgs(encoder));
+            } else {
+                args.push("-c:a", "copy");
+            }
+        }
     }
 
     args.push("-f", "hls");
@@ -88,13 +100,13 @@ async function buildFfmpegArgs(sourceFile, outputDir, probe) {
     return args;
 }
 
-function startTranscode(sourceFile, probe) {
+function startTranscode(sourceFile, probe, audioStreamIndex) {
     const sessionId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     const outputDir = ensureTranscodeDir(sessionId);
 
     const info = needsTranscoding(probe);
 
-    return buildFfmpegArgs(sourceFile, outputDir, probe).then(args => {
+    return buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex).then(args => {
         return new Promise((resolve, reject) => {
             const proc = spawn(FFMPEG_BIN, args, {
                 stdio: ["ignore", "pipe", "pipe"],
