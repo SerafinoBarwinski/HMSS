@@ -361,7 +361,7 @@ export function hmssAuthRoutes(app, getDb) {
                 RememberAudioSelections: true,
                 RememberSubtitleSelections: true,
                 EnableNextEpisodeAutoPlay: true,
-                CastReceiverId: null,
+                CastReceiverId: "F007D354",
             },
             Policy: storedPolicy ? { ...defaultPolicy, ...storedPolicy } : defaultPolicy,
         };

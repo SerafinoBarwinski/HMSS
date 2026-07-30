@@ -23,6 +23,9 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+let AudioStreamingIndexCach = [{}]
+// { userID: [{movieID:AudioStreamingIndex}] }
+
 let _liveTvCache = { channels: [], ts: 0 };
 function findLiveTvChannel(itemId) {
     return _liveTvCache.channels.find(c => c.Id === itemId) || null;
@@ -1447,10 +1450,23 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             ORDER BY sessions.created_at DESC
         `).all();
 
+        const now = Date.now();
+        const controllableUserId = req.query.ControllableByUserId;
+
+        const activeSessions = sessions.filter(s => {
+            const lastKA = server.wsLastKeepAlive.get(s.token);
+            if (!lastKA || now - lastKA > 20000) return false;
+            if (controllableUserId) {
+                const sUuid = s.uuid || String(s.id);
+                if (sUuid !== controllableUserId) return false;
+            }
+            return true;
+        });
+
         const sys = getSystemInfo(db);
         const serverId = sys?.id || "hmss-local";
 
-        res.json(sessions.map(s => ({
+        res.json(activeSessions.map(s => ({
             Id: s.token,
             UserId: s.uuid || String(s.id),
             UserName: s.name,
@@ -1973,42 +1989,6 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
 
         const filePath = findFileByItemId(itemId);
         if (!filePath) return res.status(404).json({ error: "Item not found." });
-
-        var uid = req.user?.id || req.query.userId || req.query.api_key || "default";
-        var selectedAudio = parseInt(req.query.AudioStreamIndex) || null;
-        if (selectedAudio == null)
-            selectedAudio = globalThis.__audioSelections?.[uid]?.[itemId?.replace(/-/g, "")] || null;
-
-        if (selectedAudio != null) {
-            try {
-                var probe = await probeMedia(filePath);
-                var audioStreams = (probe?.streams || []).filter(s => s.Type === "Audio");
-                var ffmpegAudioIdx = -1;
-                for (var si = 0; si < audioStreams.length; si++) {
-                    var realIdx = probe.streams.indexOf(audioStreams[si]);
-                    if (realIdx === selectedAudio) { ffmpegAudioIdx = si; break; }
-                }
-                if (ffmpegAudioIdx >= 0) {
-                    var rxExt = filePath.split(".").pop().toLowerCase();
-                    var container = rxExt === "mkv" ? "matroska" : "mp4";
-                    var mp4Flags = container === "mp4" ? ["-movflags", "frag_keyframe+empty_moov"] : [];
-                    var args = ["-hide_banner", "-loglevel", "warning", "-i", filePath,
-                        "-map", "0:v:0", "-map", "0:a:" + ffmpegAudioIdx,
-                        "-c:v", "copy", "-c:a", "copy",
-                        ...mp4Flags, "-f", container, "pipe:1"];
-                    var proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
-                    var mime = container === "matroska" ? "video/x-matroska" : "video/mp4";
-                    if (req.method === "HEAD") {
-                        proc.kill();
-                        return res.writeHead(200, { "Content-Type": mime }).end();
-                    }
-                    res.writeHead(200, { "Content-Type": mime });
-                    proc.stdout.pipe(res);
-                    proc.on("error", function () { if (!res.headersSent) res.status(500).end(); });
-                    return;
-                }
-            } catch (_) {}
-        }
 
         let stat;
         try { stat = statSync(filePath); } catch { return res.status(404).json({ error: "File not found." }); }
@@ -3487,10 +3467,11 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         return { found, itemPath, itemType, probe };
     }
 
-    function buildMediaSource(found, itemPath, id, probe, itemType, disableDirectPlay = false, audioStreamIndex) {
+    function buildMediaSource(found, itemPath, id, probe, itemType, disableDirectPlay = false, audioStreamIndex, appendAudioToTranscodeUrl = false) {
         if (!probe) return null;
         const isVideo = itemType === "Episode" || itemType === "Movie" || itemType === "Video";
-        const transcodeUrl = `/Videos/${id}/hls/master.m3u8`;
+        var transcodeUrl = `/Videos/${id}/hls/master.m3u8`;
+        if (appendAudioToTranscodeUrl && audioStreamIndex != null) transcodeUrl += "?AudioStreamIndex=" + audioStreamIndex;
         var defaultAudioIdx = audioStreamIndex != null ? audioStreamIndex : (probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null);
         return {
             Protocol: "File",
@@ -3621,9 +3602,10 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         };
     }
 
-    function buildPlaybackInfoResponse(mediaSource) {
+    function buildPlaybackInfoResponse(mediaSources) {
+        const list = Array.isArray(mediaSources) ? mediaSources : (mediaSources ? [mediaSources] : []);
         return {
-            MediaSources: mediaSource ? [mediaSource] : [],
+            MediaSources: list,
             PlaySessionId: crypto.randomUUID(),
             ErrorCode: null,
         };
@@ -3659,7 +3641,10 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
             return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel, audioIdx)));
         }
         const id = generateItemId(item.found.id || item.found.filePath);
-        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, false, audioIdx);
+        const audioStreams = (item.probe?.streams || []).filter(s => s.Type === "Audio");
+        var firstAudioIdx = audioStreams.length > 0 ? item.probe.streams.indexOf(audioStreams[0]) : -1;
+        var nonDefaultAudio = audioIdx != null && audioIdx !== firstAudioIdx;
+        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, nonDefaultAudio, audioIdx, nonDefaultAudio);
         res.json(buildPlaybackInfoResponse(mediaSource));
     });
 
@@ -3669,9 +3654,12 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         var audioIdx = parseInt(req.body?.AudioStreamIndex ?? req.query.AudioStreamIndex) || null;
         if (audioIdx != null) {
             var uid = req.user?.id || req.body?.UserId || req.query.userId || "default";
-            if (!globalThis.__audioSelections) globalThis.__audioSelections = {};
-            if (!globalThis.__audioSelections[uid]) globalThis.__audioSelections[uid] = {};
-            globalThis.__audioSelections[uid][req.params.itemId.replace(/-/g, "")] = audioIdx;
+            var nid = req.params.itemId.replace(/-/g, "");
+            AudioStreamingIndexCach[0][uid] = AudioStreamingIndexCach[0][uid] || {};
+            AudioStreamingIndexCach[0][uid][nid] = audioIdx;
+            var startTicks = parseInt(req.body?.StartTimeTicks) || 0;
+            if (startTicks > 0) AudioStreamingIndexCach[0][uid][nid + "_start"] = startTicks;
+            if (server.DEBUG_GENEREL) console.log("[PlaybackInfo] stored audioIdx:", audioIdx, "startTicks:", startTicks, "uid:", uid, "item:", nid);
         }
         if (item.tvChannel) {
             return res.json(buildPlaybackInfoResponse(buildLiveTvMediaSource(item.tvChannel, audioIdx)));
@@ -3682,7 +3670,11 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         if (deviceProfile && item.probe?.streams?.length) {
             disableDirectPlay = !clientCanDirectPlay(deviceProfile, item.probe.streams);
         }
-        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, disableDirectPlay, audioIdx);
+        const audioStreams = (item.probe?.streams || []).filter(s => s.Type === "Audio");
+        var firstAudioIdx = audioStreams.length > 0 ? item.probe.streams.indexOf(audioStreams[0]) : -1;
+        var nonDefaultAudio = audioIdx != null && audioIdx !== firstAudioIdx;
+        if (nonDefaultAudio) disableDirectPlay = true;
+        const mediaSource = buildMediaSource(item.found, item.itemPath, id, item.probe, item.itemType, disableDirectPlay, audioIdx, nonDefaultAudio);
         res.json(buildPlaybackInfoResponse(mediaSource));
     });
     app.post('/LiveStreams/Close', (req, res) => { /* CloseLiveStream */ res.status(200).json({ message: 'Not implemented' }); });
@@ -4323,7 +4315,7 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
     // === HLS Transcoding ===
     const hlsSessions = new Map();
 
-    async function startHlsTranscode(itemId, audioStreamIndex) {
+    async function startHlsTranscode(itemId, audioStreamIndex, startTimeSec) {
         const rawId = (itemId || "").replace(/-/g, "");
         const filePath = findFileByItemId(rawId);
         if (!filePath) return null;
@@ -4331,28 +4323,46 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         let probe = null;
         try { probe = await probeMedia(filePath); } catch {}
 
-        const existingKey = `${rawId}-a${audioStreamIndex != null ? audioStreamIndex : "0"}`;
+        var startPart = startTimeSec > 0 ? "-s" + Math.round(startTimeSec) : "";
+        const existingKey = `${rawId}-a${audioStreamIndex != null ? audioStreamIndex : "0"}${startPart}`;
         if (hlsSessions.has(existingKey)) {
             const existing = hlsSessions.get(existingKey);
-            if (existing.session && !existing.session.process.killed) {
+            if (existing.session && existing.session.finishedAt === null) {
                 return { sessionId: existing.session.id };
             }
             hlsSessions.delete(existingKey);
         }
 
-        const session = await transcoder.startTranscode(filePath, probe, audioStreamIndex);
+        const session = await transcoder.startTranscode(filePath, probe, audioStreamIndex, startTimeSec);
         hlsSessions.set(existingKey, { session, itemId: rawId, createdAt: Date.now() });
         return { sessionId: session.id };
     }
 
     app.get('/Videos/:itemId/hls/master.m3u8', async (req, res) => {
         try {
+            var rawId = req.params.itemId.replace(/-/g, "");
+            var uid = req.user?.id || req.query.userId || "default";
             var audioStreamIndex = parseInt(req.query.AudioStreamIndex) || null;
             if (audioStreamIndex == null) {
-                var uid = req.user?.id || req.query.userId || "default";
-                audioStreamIndex = globalThis.__audioSelections?.[uid]?.[req.params.itemId.replace(/-/g, "")] || null;
+                audioStreamIndex = AudioStreamingIndexCach[0]?.[uid]?.[rawId];
+                if (audioStreamIndex == null) {
+                    for (var u in AudioStreamingIndexCach[0]) {
+                        var v = AudioStreamingIndexCach[0][u]?.[rawId];
+                        if (v != null) { audioStreamIndex = v; break; }
+                    }
+                }
             }
-            const result = await startHlsTranscode(req.params.itemId, audioStreamIndex);
+            var startTimeSec = 0;
+            var startTicks = AudioStreamingIndexCach[0]?.[uid]?.[rawId + "_start"] || 0;
+            if (startTicks === 0) {
+                for (var u in AudioStreamingIndexCach[0]) {
+                    var t = AudioStreamingIndexCach[0][u]?.[rawId + "_start"];
+                    if (t != null && t > 0) { startTicks = t; break; }
+                }
+            }
+            if (startTicks > 0) startTimeSec = startTicks / 10000000;
+            if (server.DEBUG_GENEREL) console.log("[HLS] master.m3u8 item:", rawId, "audioIdx:", audioStreamIndex, "startTicks:", startTicks, "startSec:", startTimeSec, "query:", req.query.AudioStreamIndex);
+            const result = await startHlsTranscode(req.params.itemId, audioStreamIndex, startTimeSec);
             if (!result) return res.status(404).json({ error: "Item not found." });
             const baseUrl = `/Videos/${req.params.itemId}/hls`;
             const master = [
@@ -4362,7 +4372,10 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
                 `${baseUrl}/${result.sessionId}/playlist.m3u8`,
             ].join("\n");
             res.set("Content-Type", "application/vnd.apple.mpegurl");
-            res.set("Cache-Control", "no-cache");
+            res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+            res.set("Pragma", "no-cache");
+            res.set("Expires", "0");
+            res.set("ETag", "");
             res.send(master);
         } catch (err) {
             console.error("HLS master error:", err.message);
@@ -4375,7 +4388,9 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
             const playlist = transcoder.readPlaylist(req.params.sessionId);
             if (!playlist) return res.status(404).json({ error: "Playlist not found." });
             res.set("Content-Type", "application/vnd.apple.mpegurl");
-            res.set("Cache-Control", "no-cache");
+            res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+            res.set("Pragma", "no-cache");
+            res.set("Expires", "0");
             res.send(playlist);
         } catch (err) {
             res.status(500).json({ error: "Failed to read playlist." });

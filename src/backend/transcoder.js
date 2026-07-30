@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, existsSync, readdirSync, readFileSync } from "node:f
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { DEBUG_GENEREL } from "../../server.js";
 import {
     needsVideoTranscoding,
     needsAudioTranscoding,
@@ -46,8 +47,11 @@ function needsTranscoding(probe) {
     return { videoNeeded, audioNeeded, needed: videoNeeded || audioNeeded };
 }
 
-async function buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex) {
+async function buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex, startTimeSec) {
+    if (DEBUG_GENEREL) console.log("[FFMPEG] buildFfmpegArgs input:", JSON.stringify({ sourceFile, audioStreamIndex, startTimeSec, streamCount: probe?.streams?.length }));
+
     const args = ["-hide_banner", "-loglevel", "warning"];
+    if (startTimeSec > 0) args.push("-ss", String(startTimeSec));
     args.push("-i", sourceFile);
 
     const videoStream = probe?.streams?.find(s => s.Type === "Video");
@@ -66,8 +70,12 @@ async function buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex) {
     }
 
     var audioIdx = audioStreamIndex != null ? audioStreamIndex : (probe?.streams?.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null);
+    if (DEBUG_GENEREL) console.log("[FFMPEG] audioIdx:", audioIdx, "total streams:", probe?.streams?.map(s => s.Type + ":" + s.Index));
+
     if (audioIdx != null && probe?.streams?.[audioIdx]?.Type === "Audio") {
-        args.push("-map", "0:v:0", "-map", "0:a:" + (probe.streams.filter(s => s.Type === "Audio").indexOf(probe.streams[audioIdx])));
+        var audioMapIdx = probe.streams.filter(s => s.Type === "Audio").indexOf(probe.streams[audioIdx]);
+        if (DEBUG_GENEREL) console.log("[FFMPEG] mapping audio: program stream index", audioIdx, "→ ffmpeg -map 0:a:" + audioMapIdx, "codec:", probe.streams[audioIdx].Codec, "language:", probe.streams[audioIdx].Language);
+        args.push("-map", "0:v:0", "-map", "0:a:" + audioMapIdx);
         var audioStream = probe.streams[audioIdx];
         if (needsAudioTranscoding(audioStream.Codec)) {
             const encoder = await pickBestAudioEncoder();
@@ -97,16 +105,17 @@ async function buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex) {
     args.push("-hls_segment_filename", path.join(outputDir, "seg_%05d.ts"));
     args.push(path.join(outputDir, "playlist.m3u8"));
 
+    if (DEBUG_GENEREL) console.log("[FFMPEG] final args:", args.join(" "));
     return args;
 }
 
-function startTranscode(sourceFile, probe, audioStreamIndex) {
+function startTranscode(sourceFile, probe, audioStreamIndex, startTimeSec) {
     const sessionId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     const outputDir = ensureTranscodeDir(sessionId);
 
     const info = needsTranscoding(probe);
 
-    return buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex).then(args => {
+    return buildFfmpegArgs(sourceFile, outputDir, probe, audioStreamIndex, startTimeSec).then(args => {
         return new Promise((resolve, reject) => {
             const proc = spawn(FFMPEG_BIN, args, {
                 stdio: ["ignore", "pipe", "pipe"],

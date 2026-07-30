@@ -36,17 +36,19 @@ var mediaDirs = {
 var ffmpeg_bin = "/bin/ffmpeg" //Fallback FFMPEG Path Arg
 var JPI_Version = "10.11.11" //Jellyfin API Version
 
+var DEBUG_GENEREL = false
 var DEBUG_LOG_EVERY_REQUEST = false
 var DEBUG_LOG_EVERY_WEBSCKT = false;
 var DEBUG_fail_integrity_check = false;
 var DEBUG_skip_integrity_check = false;
 var DEBUG_TEA_POT = false;
-var DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = true;
+var DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = false;
 
 var is_server_ready = false;
 var ServerUptime = 0;
 
 export {
+    DEBUG_GENEREL,
     DEBUG_LOG_EVERY_REQUEST,
     DEBUG_LOG_EVERY_WEBSCKT,
     DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG,
@@ -73,8 +75,10 @@ for (const arg of args) {
             break;
         case "--debug":
             console.log("Debug-Mode active");
-            DEBUG_LOG_EVERY_REQUEST = true;
-            DEBUG_LOG_EVERY_WEBSCKT = true;
+            DEBUG_GENEREL = true;
+            DEBUG_LOG_EVERY_REQUEST = true
+            DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = true
+            DEBUG_LOG_EVERY_WEBSCKT = true
             break;
         case "--fail-integrity-check":
             DEBUG_fail_integrity_check = true;
@@ -251,6 +255,7 @@ const server = app.listen(port, "0.0.0.0", async () => {
 const wss = new WebSocketServer({ server, path: "/socket" });
 
 const wsClients = new Set();
+export const wsLastKeepAlive = new Map();
 
 function sendToAllClients(messageType, data = null) {
     const msg = { messageType, messageId: crypto.randomUUID() };
@@ -318,6 +323,7 @@ wss.on("connection", (ws, req) => {
 
             switch (msg.messageType) {
                 case "KeepAlive":
+                    wsLastKeepAlive.set(ws._token, Date.now());
                     ws.send(JSON.stringify({
                         messageType: "ForceKeepAlive",
                         messageId: crypto.randomUUID(),
@@ -397,6 +403,7 @@ wss.on("connection", (ws, req) => {
     });
 
     ws.on("close", () => {
+        wsLastKeepAlive.delete(ws._token);
         wsClients.delete(ws);
         intervals.forEach(id => clearInterval(id));
         intervals.clear();
@@ -404,6 +411,7 @@ wss.on("connection", (ws, req) => {
     });
 
     ws.on("error", () => {
+        wsLastKeepAlive.delete(ws._token);
         wsClients.delete(ws);
     });
 });
