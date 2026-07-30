@@ -1950,7 +1950,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         return null;
     }
 
-    function streamFile(req, res, itemId) {
+    async function streamFile(req, res, itemId) {
         const rawId = (itemId || "").replace(/-/g, "");
         const tvChannel = findLiveTvChannel(rawId);
         if (tvChannel) {
