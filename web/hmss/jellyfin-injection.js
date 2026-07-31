@@ -350,7 +350,7 @@ pageObserver.observe(document.body, {
 
 const script = document.createElement("script");
 script.src = "/eruda";
-script.onload = () => {
+if (false) script.onload = () => {
   eruda.init();
 };
 

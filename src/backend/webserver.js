@@ -4,6 +4,7 @@ import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedIt
 import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { getItemMeta } from "./meta_reader.js";
+import { renderSplashscreen } from "./splashscreen.js";
 import { readFile, writeFile } from "node:fs/promises";
 import * as telerising from "./telerising.js";
 import * as codecs from "./codecs.js";
@@ -51,6 +52,29 @@ let _liveTvCache = { channels: [], ts: 0 };
         let stored = {};
         try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
         stored.livetv = config;
+        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
+    }
+
+    const DEFAULT_BRANDING_CSS = '@import url("https://cdn.jsdelivr.net/gh/lscambo13/ElegantFin@main/Theme/ElegantFin-jellyfin-theme-build-latest-minified.css");';
+    const DEFAULT_LOGIN_DISCLAIMER = "Private Media Server\n\nThis server is intended for private use by authorized users only.\n\t• Connection information, including your IP address, may be logged for security purposes.\n\t• Logs are only used to investigate abuse, unauthorized access, or attacks.\n\t• As this is a private service and not intended for public use, public legal notices or privacy information may not be provided.\n\nIf you are not authorized to access this server, please disconnect.";
+
+    function getBrandingConfig(db) {
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+        return {
+            SplashscreenEnabled: false,
+            LoginDisclaimer: DEFAULT_LOGIN_DISCLAIMER,
+            CustomCss: DEFAULT_BRANDING_CSS,
+            ...(stored.branding || {}),
+        };
+    }
+
+    function setBrandingConfig(db, config) {
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+        stored.branding = config;
         db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
     }
 
@@ -1535,7 +1559,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     });
 
     app.get("/Branding/Configuration", (req, res) => {
-        res.json({ SplashscreenEnabled: false });
+        res.json(getBrandingConfig(getDb()));
     });
 
     app.head("/System/Info/Public", (req, res) => {
@@ -2590,7 +2614,18 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.get('/Artists/:name/Images/:imageType/:imageIndex', (req, res) => { /* GetArtistImage */ res.status(200).json({ message: 'Not implemented' }); });
     app.head('/Artists/:name/Images/:imageType/:imageIndex', (req, res) => { /* HeadArtistImage */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Branding/Splashscreen', (req, res) => { /* DeleteCustomSplashscreen */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Branding/Splashscreen', (req, res) => { /* GetSplashscreen */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Branding/Splashscreen', async (req, res) => { /* GetSplashscreen */
+        try {
+            const buf = await renderSplashscreen(globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] });
+            res.set("Content-Type", "image/jpeg");
+            res.set("Cache-Control", "private, max-age=3600");
+            res.send(buf);
+            res.status(200);
+        } catch (e) {
+            if (server.DEBUG_GENEREL) console.error("[SPLASH] error:", e.message);
+            res.status(500).end();
+        }
+    });
     app.post('/Branding/Splashscreen', (req, res) => { /* UploadCustomSplashscreen */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Genres/:name/Images/:imageType', (req, res) => { /* GetGenreImage */ res.status(200).json({ message: 'Not implemented' }); });
     app.head('/Genres/:name/Images/:imageType', (req, res) => { /* HeadGenreImage */ res.status(200).json({ message: 'Not implemented' }); });
@@ -4165,7 +4200,18 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     // === System ===
     app.post('/ClientLog/Document', (req, res) => { /* LogFile */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/GetUtcTime', (req, res) => { /* GetUtcTime */ res.status(200).json({ message: 'Not implemented' }); });
-    app.post('/System/Configuration/Branding', (req, res) => { /* UpdateBrandingConfiguration */ res.status(200).json({ message: 'Not implemented' }); });
+    app.post('/System/Configuration/Branding', (req, res) => { /* UpdateBrandingConfiguration */
+        if (!req.user || req.user.perms < 2) return res.status(401).end();
+        const db = getDb();
+        const body = req.body || {};
+        const current = getBrandingConfig(db);
+        const branding = { ...current };
+        for (const key of ["CustomCss", "LoginDisclaimer", "SplashscreenEnabled"]) {
+            if (body[key] !== undefined) branding[key] = body[key];
+        }
+        setBrandingConfig(db, branding);
+        res.status(204).end();
+    });
     app.get('/System/Configuration/MetadataOptions/Default', (req, res) => { /* GetDefaultMetadataOptions */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/System/Configuration/:key', (req, res) => {
         if (!req.user || req.user.perms < 2) return res.status(401).end();

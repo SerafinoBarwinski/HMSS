@@ -11,6 +11,7 @@
     "checkrun": "ps aux | grep -E 'node|telerising'"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.3",
     "argon2": "^0.45.0",
     "better-sqlite3": "^13.0.1",
     "eruda": "^3.4.3",
