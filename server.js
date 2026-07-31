@@ -124,7 +124,7 @@ console.log(figlet.textSync("\nHMSS", {
 
 
 const addonConfig = {};
-export const addons = await addonLoader.loadAddons(addonConfig);
+export const addons = await addonLoader.loadAddons(addonConfig, db);
 
 export async function StartMediaIndex() {
     console.log("The indexer has started. This may take a while...")
@@ -215,7 +215,7 @@ globalThis.__hmssDebugAcceptRemote = DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG;
 
 await webserver.hmssRoutes(app, getDb, JPI_Version, port, mediaDirs)
 await webserver.jellyfinRoutes(app, getDb, JPI_Version, mediaDirs, port)
-await webserver.addonRoutes(app)
+await webserver.addonRoutes(app, getDb)
 telerisingRoutes(app, getDb, port)
 
 // HMSS injection: patch index.html at serve time so Jellyfin web files stay vanilla

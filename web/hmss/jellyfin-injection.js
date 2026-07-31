@@ -4,14 +4,13 @@ const showCustomMenu = true;
 // is State
 var hasEruda = false;
 
-const hmssMenuItems = [
-    {
-        title: "NFC",
-        icon: "nfc",
-        link: "#/nfc",
-        html: "/web/hmss/AdditionalJellyPages/nfc.html"
-    }
-];
+// --- Addon UI registry, filled from /api/addons/ui ---
+var _hmssRoutes = [];
+var _hmssScripts = [];
+var _hmssPageLoaded = null;
+
+// feature buttons registered by addon persistent scripts
+var _hmssFeatureItems = [];
 
 function getAuthHeaders() {
     var token = window.ApiClient?.accessToken() || "";
@@ -19,6 +18,10 @@ function getAuthHeaders() {
         "X-Emby-Authorization": 'MediaBrowser Token="' + token + '"',
         "Content-Type": "application/json"
     };
+}
+
+function getUserId() {
+    return window.ApiClient?.getCurrentUserId() || "";
 }
 
 function showToast(text, isError) {
@@ -45,8 +48,17 @@ function showToast(text, isError) {
     }, 3300);
 }
 
-let _nfcScannerActive = false;
-let _nfcController = null;
+// Global HMSS API for addon persistent scripts
+window.HMSS = {
+    showToast: showToast,
+    getAuthHeaders: getAuthHeaders,
+    getUserId: getUserId,
+    addFeatureButton: function (entry) {
+        if (entry && entry.label && typeof entry.action === "function") {
+            _hmssFeatureItems.push(entry);
+        }
+    }
+};
 
 function createFeaturesButton() {
     var btn = document.createElement("button");
@@ -68,40 +80,55 @@ function createFeaturesButton() {
     var popup = document.createElement("div");
     popup.style.cssText = "display:none;position:fixed;bottom:44px;right:12px;z-index:10000;background:rgba(20,20,20,0.95);border:1px solid #444;border-radius:10px;padding:8px 0;min-width:180px;backdropFilter:blur(8px);";
 
-    var items = [
-        {
-            label: "Change Design", icon: "palette", action: function () {
-                localStorage.removeItem("HMSSDesign");
-                location.href = "/web/alt_index.html";
-            }
-        },
-        {
-            label: "NFC", icon: "nfc", action: function () {
-                popup.style.display = "none";
-                startNFCScanner();
-            }
-        },
-        {
-            label: "Remote Debugging", icon: "bug_report", action: function () {
-                popup.style.display = "none";
-                toggleRemoteDebug();
-            }
-        }
-    ];
+    function buildPopup() {
+        popup.innerHTML = "";
 
-    items.forEach(function (item, i) {
-        var el = document.createElement("div");
-        el.style.cssText = "padding:8px 16px;cursor:pointer;color:#ccc;font-size:13px;display:flex;align-items:center;gap:8px;";
-        if (i < items.length - 1) el.style.borderBottom = "1px solid #333";
-        el.textContent = item.label;
-        el.addEventListener("mouseenter", function () { el.style.background = "rgba(255,255,255,0.1)"; });
-        el.addEventListener("mouseleave", function () { el.style.background = "transparent"; });
-        el.addEventListener("click", item.action);
-        popup.appendChild(el);
-    });
+        var items = [
+            {
+                label: "Change Design", icon: "palette", action: function () {
+                    popup.style.display = "none";
+                    localStorage.removeItem("HMSSDesign");
+                    location.href = "/web/alt_index.html";
+                }
+            },
+            {
+                label: "Remote Debugging", icon: "bug_report", action: function () {
+                    popup.style.display = "none";
+                    toggleRemoteDebug();
+                }
+            }
+        ].concat(_hmssFeatureItems);
+
+        items.forEach(function (item, i) {
+            var el = document.createElement("div");
+            el.style.cssText = "padding:8px 16px;cursor:pointer;color:#ccc;font-size:13px;display:flex;align-items:center;gap:8px;";
+            if (i < items.length - 1) el.style.borderBottom = "1px solid #333";
+
+            var iconSpan = document.createElement("span");
+            iconSpan.className = "material-icons";
+            iconSpan.style.fontSize = "14px";
+            iconSpan.textContent = item.icon || "widgets";
+
+            var labelSpan = document.createElement("span");
+            labelSpan.textContent = item.label;
+
+            el.appendChild(iconSpan);
+            el.appendChild(labelSpan);
+
+            el.addEventListener("mouseenter", function () { el.style.background = "rgba(255,255,255,0.1)"; });
+            el.addEventListener("mouseleave", function () { el.style.background = "transparent"; });
+            el.addEventListener("click", item.action);
+            popup.appendChild(el);
+        });
+    }
 
     btn.onclick = function () {
-        popup.style.display = popup.style.display === "none" ? "block" : "none";
+        if (popup.style.display === "none") {
+            buildPopup();
+            popup.style.display = "block";
+        } else {
+            popup.style.display = "none";
+        }
     };
 
     document.body.appendChild(btn);
@@ -114,54 +141,6 @@ function createFeaturesButton() {
         popup.style.display = "none";
     });
     mouseObserver.observe(document.body, { attributes: true, attributeFilter: ["class"] });
-}
-
-async function startNFCScanner() {
-    if (!("NDEFReader" in window)) {
-        showToast("HMSS: Web NFC not supported.");
-        return;
-    }
-    if (_nfcScannerActive) {
-        showToast("HMSS: NFC scanner already active.");
-        return;
-    }
-    _nfcScannerActive = true;
-
-    var userId = window.ApiClient?.getCurrentUserId() || "";
-    if (!userId) { _nfcScannerActive = false; return; }
-
-    try {
-        var resp = await fetch("/hmss/nfc/" + userId, { headers: getAuthHeaders() });
-        var data = await resp.json();
-        var tags = data.Items || [];
-        if (tags.length === 0) {
-            console.log("HMSS: No known NFC tags.");
-            _nfcScannerActive = false;
-            return;
-        }
-
-        var ndef = new NDEFReader();
-        _nfcController = ndef;
-        await ndef.scan();
-        console.log("HMSS: NFC scanner started, " + tags.length + " tags loaded.");
-
-        ndef.addEventListener("reading", function (e) {
-            var serial = e.serialNumber;
-            var match = null;
-            for (var i = 0; i < tags.length; i++) {
-                if (tags[i].TagId === serial) { match = tags[i]; break; }
-            }
-            if (!match) {
-                console.log("HMSS: Unknown NFC tag:", serial);
-                return;
-            }
-            console.log("HMSS: Matched tag:", match.TagName);
-            executeNFCAction(match);
-        });
-    } catch (err) {
-        console.error("HMSS: NFC scanner error:", err);
-        _nfcScannerActive = false;
-    }
 }
 
 var _remoteDebugActive = false;
@@ -188,7 +167,7 @@ function toggleRemoteDebug() {
         hasEruda = true;
     }
 
-    var userId = window.ApiClient?.getCurrentUserId() || "";
+    var userId = getUserId();
     if (!userId) { showToast("Not logged in", true); return; }
 
     fetch("/hmss/remote-debug", { method: "POST", headers: getAuthHeaders(), body: JSON.stringify({ level: "log", message: "[ping]" }) })
@@ -220,33 +199,15 @@ function toggleRemoteDebug() {
         });
 }
 
-function executeNFCAction(tag) {
-    var actionType = tag.ActionType || "none";
-    var d = tag.data || "";
-
-    switch (actionType) {
-        case "playmedia":
-            if (d) {
-                location.href = "/web/index.html#/details?id=" + encodeURIComponent(d);
-            }
-            break;
-        case "changepage":
-            if (d) {
-                location.href = d;
-            }
-            break;
-        default:
-            console.log("HMSS: NFC tag '" + (tag.TagName || tag.TagId) + "' has no action.");
-            break;
-    }
-}
-
-createFeaturesButton();
-
 function insertHMSSMenu() {
     if (!showCustomMenu) {
         return;
     }
+    const routes = _hmssRoutes.filter(r => r.menu);
+    if (routes.length === 0) {
+        return;
+    }
+
     const libraryMenuOptions = document.querySelector(".libraryMenuOptions");
 
     if (!libraryMenuOptions || document.querySelector(".hmssMenuOptions")) {
@@ -262,7 +223,7 @@ function insertHMSSMenu() {
 
     container.appendChild(h3);
 
-    hmssMenuItems.forEach(item => {
+    routes.forEach(item => {
         const link = document.createElement("a");
         link.setAttribute("is", "emby-linkbutton");
         link.className = "lnkMediaFolder navMenuOption emby-button";
@@ -318,21 +279,31 @@ insertHMSSMenu();
     });
 })();
 
-let _hmssPageLoaded = null;
+function injectPersistentScripts() {
+    _hmssScripts.forEach(function (src) {
+        if (document.querySelector('script[src="' + src + '"]')) return;
+        const s = document.createElement("script");
+        s.src = src;
+        s.async = true;
+        document.body.appendChild(s);
+    });
+}
 
 async function loadHMSSPage() {
     const hash = window.location.hash;
-    const menuItem = hmssMenuItems.find(item => item.link === hash);
+    const menuItem = _hmssRoutes.find(item => item.link === hash);
     if (!menuItem) { _hmssPageLoaded = null; return; }
 
     const fallbackPage = document.getElementById("fallbackPage");
     const pageTitle = document.querySelector(".pageTitle");
     if (!fallbackPage) return;
 
-    if (fallbackPage.querySelector(".nfcPage") && _hmssPageLoaded === hash) return;
+    if (_hmssPageLoaded === hash) return;
     _hmssPageLoaded = hash;
 
     console.log("Loading HMSS page:", menuItem.title);
+
+    if (!menuItem.html) return;
 
     try {
         const response = await fetch(menuItem.html);
@@ -356,6 +327,23 @@ async function loadHMSSPage() {
     }
 }
 
+async function bootHMSS() {
+    try {
+        const resp = await fetch("/api/addons/ui");
+        if (resp.ok) {
+            const registry = await resp.json();
+            _hmssRoutes = registry.routes || [];
+            _hmssScripts = registry.scripts || [];
+        }
+    } catch (e) {
+        console.warn("HMSS: failed to load addon UI registry:", e);
+    }
+
+    injectPersistentScripts();
+    insertHMSSMenu();
+    loadHMSSPage();
+}
+
 window.addEventListener("hashchange", loadHMSSPage);
 
 const pageObserver = new MutationObserver(() => {
@@ -368,3 +356,6 @@ pageObserver.observe(document.body, {
     childList: true,
     subtree: true
 });
+
+createFeaturesButton();
+bootHMSS();

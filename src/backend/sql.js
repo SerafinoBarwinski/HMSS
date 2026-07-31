@@ -61,6 +61,14 @@ export async function init(rootPsw, db, argon2) {
             FOREIGN KEY (user_id) REFERENCES users(id),
             UNIQUE(user_id, tag_id)
         );
+
+        create table if not exists "addons" (
+            "id" TEXT PRIMARY KEY,
+            "config_json" TEXT not null default '{}',
+            "enabled" BOOLEAN not null default true,
+            "installed_at" TEXT not null default CURRENT_TIMESTAMP,
+            "updated_at" TEXT not null default CURRENT_TIMESTAMP
+        );
     `); // PERMS: 0 - 3; where 3 is root and 2 admin. 1 manager and 0 visitor
 
     // add uuid column to existing tables (harmless if already exists)
@@ -443,4 +451,31 @@ export function addOrUpdateNFC(db, userId, tagId, tagName, actionType, data, des
 export function removeNFC(db, userId, tagId) {
     const result = db.prepare("DELETE FROM user_nfc WHERE user_id = ? AND tag_id = ?").run(userId, tagId);
     return result.changes > 0;
+}
+
+export function getAddonRow(db, addonId) {
+    return db.prepare("SELECT * FROM addons WHERE id = ?").get(addonId);
+}
+
+export function getAllAddonRows(db) {
+    return db.prepare("SELECT * FROM addons ORDER BY id").all();
+}
+
+export function setAddonConfig(db, addonId, config) {
+    const existing = db.prepare("SELECT id FROM addons WHERE id = ?").get(addonId);
+    const json = JSON.stringify(config || {});
+    if (existing) {
+        db.prepare("UPDATE addons SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(json, addonId);
+    } else {
+        db.prepare("INSERT INTO addons (id, config_json) VALUES (?, ?)").run(addonId, json);
+    }
+}
+
+export function setAddonEnabled(db, addonId, enabled) {
+    const existing = db.prepare("SELECT id FROM addons WHERE id = ?").get(addonId);
+    if (existing) {
+        db.prepare("UPDATE addons SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(enabled ? 1 : 0, addonId);
+    } else {
+        db.prepare("INSERT INTO addons (id, config_json, enabled) VALUES (?, ?, ?)").run(addonId, "{}", enabled ? 1 : 0);
+    }
 }

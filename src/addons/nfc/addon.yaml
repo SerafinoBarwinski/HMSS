@@ -1,0 +1,14 @@
+name: NFC
+version: "1.0"
+description: "NFC tag management and scanning for Jellyfin"
+capabilities:
+  - ui
+web:
+  routes:
+    - path: nfc
+      title: NFC
+      icon: nfc
+      html: pages/nfc.html
+      menu: true
+  scripts:
+    - scripts/nfc.js

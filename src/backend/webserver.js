@@ -1,11 +1,11 @@
-import { getAddons, getAddonsByCapability, searchAll } from "./addon_loader.js";
+import { getAddons, getAllAddons, getAddonsByCapability, searchAll, getWebRegistry, getAddonWebFiles, getAddonDir, registerAddonBackendRoutes } from "./addon_loader.js";
 import { authMiddleware, hmssAuthRoutes } from "./auth.js";
-import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems, getUserNFCs, getNFCByTagId, addOrUpdateNFC, removeNFC } from "./sql.js";
+import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems, getAddonRow, getAllAddonRows, setAddonConfig, setAddonEnabled } from "./sql.js";
 import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { getItemMeta } from "./meta_reader.js";
 import { renderSplashscreen } from "./splashscreen.js";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import * as telerising from "./telerising.js";
 import * as codecs from "./codecs.js";
 import * as transcoder from "./transcoder.js";
@@ -509,79 +509,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.sendFile(path.join(__dirname, "../../web/hmss/img/logo.png"));
     });
 
-    // NFC tag management
-    const HA_TAG_REGEX = /^https?:\/\/(www\.)?home-assistant\.io\/tag\/(.+)$/i;
-
-    app.get("/hmss/nfc/:UserID", (req, res) => {
-        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
-        const db = getDb();
-        const nfcTags = getUserNFCs(db, req.user.id);
-        res.json({
-            Items: nfcTags.map(n => ({
-                Id: n.id,
-                UserId: String(n.user_id),
-                TagId: n.tag_id,
-                TagName: n.tag_name,
-                TagDescription: n.description || "",
-                ActionType: n.action_type,
-                data: n.action_payload || "",
-                isFromHA: Boolean(n.is_from_ha),
-                CreatedAt: n.created_at,
-            })),
-            TotalRecordCount: nfcTags.length,
-        });
-    });
-
-    app.post("/hmss/nfc/:UserID/:TagID", (req, res) => {
-        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
-        const db = getDb();
-        const { TagName, TagDescription, ActionType, data, isFromHA } = req.body || {};
-
-        let finalTagId = req.params.TagID;
-        let detectedHA = Boolean(isFromHA);
-
-        const haMatch = finalTagId.match(HA_TAG_REGEX);
-        if (haMatch) {
-            finalTagId = haMatch[2];
-            detectedHA = true;
-        }
-
-        const existing = getNFCByTagId(db, req.user.id, finalTagId);
-        if (existing && existing.is_from_ha && !detectedHA) {
-            return res.status(409).json({ error: "This tag was scanned via Home Assistant and its UUID cannot be changed." });
-        }
-
-        const result = addOrUpdateNFC(
-            db,
-            req.user.id,
-            finalTagId,
-            TagName || "",
-            ActionType || "none",
-            data || "",
-            TagDescription || "",
-            detectedHA
-        );
-        res.status(result.updated ? 200 : 201).json({
-            Id: result.id,
-            UserId: String(req.user.id),
-            TagId: finalTagId,
-            TagName: TagName || "",
-            TagDescription: TagDescription || "",
-            ActionType: ActionType || "none",
-            data: data || "",
-            isFromHA: detectedHA,
-            Updated: result.updated,
-        });
-    });
-
-    app.delete("/hmss/nfc/:UserID/:TagID", (req, res) => {
-        if (!req.user) return res.status(401).json({ error: "Unauthorized." });
-        const db = getDb();
-        const removed = removeNFC(db, req.user.id, req.params.TagID);
-        if (!removed) return res.status(404).json({ error: "NFC tag not found." });
-        res.status(204).end();
-    });
-
+    // NFC tag management — implemented by the NFC addon (src/addons/nfc)
     app.post("/hmss/remote-debug", (req, res) => {
         if (!globalThis.__hmssDebugAcceptRemote) return res.status(403).json({ error: "Remote debug disabled." });
         if (!req.user) return res.status(401).json({ error: "Unauthorized." });
@@ -868,24 +796,25 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const addons = getAddons();
         const addon = addons.find(a => a.id === req.params.pluginId || a.name === req.params.pluginId);
         if (!addon) return res.status(404).json({ error: "Plugin not found" });
-        res.json(addon.config);
+        const row = getAddonRow(getDb(), addon.id);
+        let stored = {};
+        try { stored = JSON.parse(row?.config_json || "{}"); } catch {}
+        res.json({ ...addon.config, ...stored });
     });
 
-    app.post("/Plugins/:pluginId/Configuration", async (req, res) => {
+    app.post("/Plugins/:pluginId/Configuration", (req, res) => {
         if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
         const addons = getAddons();
         const addon = addons.find(a => a.id === req.params.pluginId || a.name === req.params.pluginId);
         if (!addon) return res.status(404).json({ error: "Plugin not found" });
 
-        const addonDir = `src/addons/${req.params.pluginId}`;
-        try {
-            const existing = JSON.parse(await readFile(`${addonDir}/override.json`, "utf-8").catch(() => "{}"));
-            Object.assign(existing, req.body);
-            await writeFile(`${addonDir}/override.json`, JSON.stringify(existing, null, 2));
-            res.json({ Configuration: { ...existing } });
-        } catch (e) {
-            res.status(500).json({ error: e.message });
-        }
+        const db = getDb();
+        const stored = getAddonRow(db, addon.id);
+        let parsed = {};
+        try { parsed = JSON.parse(stored?.config_json || "{}"); } catch {}
+        Object.assign(parsed, req.body || {});
+        setAddonConfig(db, addon.id, parsed);
+        res.json({ Configuration: { ...parsed } });
     });
 
     async function findProgramChannel(rawId) {
@@ -2356,18 +2285,53 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
 }
 
-export async function addonRoutes(app) {
+export async function addonRoutes(app, getDb) {
     app.get("/api/addons", (req, res) => {
-        res.json(getAddons().map(a => ({
-            id: a.id,
-            name: a.name,
-            version: a.version,
-            description: a.description,
-            capabilities: a.capabilities,
-            dependency: a.dependency,
-            configSchema: a.configSchema,
-            configured: Object.values(a.config).some(v => v),
-        })));
+        const dbRows = {};
+        for (const row of getAllAddonRows(getDb())) dbRows[row.id] = row;
+        res.json(getAllAddons().map(a => {
+            const row = dbRows[a.id];
+            return {
+                id: a.id,
+                name: a.name,
+                version: a.version,
+                description: a.description,
+                capabilities: a.capabilities,
+                dependency: a.dependency,
+                configSchema: a.configSchema,
+                configured: Object.values(a.config || {}).some(v => v),
+                enabled: row ? Boolean(row.enabled) : a.enabled !== false,
+            };
+        }));
+    });
+
+    // enable/disable an addon (takes effect on server restart)
+    app.patch("/api/addons/:addonId", (req, res) => {
+        if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
+        const addon = getAllAddons().find(a => a.id === req.params.addonId);
+        if (!addon) return res.status(404).json({ error: "Addon not found" });
+        const { enabled } = req.body || {};
+        if (typeof enabled !== "boolean") return res.status(400).json({ error: "enabled (boolean) required" });
+        setAddonEnabled(getDb(), addon.id, enabled);
+        console.log(`Addon '${addon.id}': ${enabled ? "enabled" : "disabled"} — takes effect on restart`);
+        res.json({ id: addon.id, enabled });
+    });
+
+    // UI registry consumed by web/hmss/jellyfin-injection.js
+    app.get("/api/addons/ui", (req, res) => {
+        res.json(getWebRegistry());
+    });
+
+    // Addon web assets — only serves files declared in the addon manifest
+    app.get("/addons/:addonId/*splat", (req, res) => {
+        const rel = (req.params.splat || []).join("/");
+        const allowed = getAddonWebFiles(req.params.addonId);
+        if (!allowed.has(rel)) return res.status(404).end();
+        const addonDir = getAddonDir(req.params.addonId);
+        if (!addonDir) return res.status(404).end();
+        const fullPath = path.resolve(addonDir, rel);
+        if (!fullPath.startsWith(addonDir + path.sep)) return res.status(404).end();
+        res.sendFile(fullPath, err => { if (err) res.status(404).end(); });
     });
 
     app.get("/api/addons/search", async (req, res) => {
@@ -2376,6 +2340,9 @@ export async function addonRoutes(app) {
         const results = await searchAll({ query, year, type });
         res.json(results);
     });
+
+    // let addons register their own backend routes (called after authMiddleware is mounted)
+    registerAddonBackendRoutes(app, getDb);
 }
 
 export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {}) {

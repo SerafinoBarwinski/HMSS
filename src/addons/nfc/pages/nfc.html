@@ -133,10 +133,9 @@
                             items.forEach(function (tag) {
                                 var tagDiv = document.createElement('div');
                                 tagDiv.className = 'listItemBody';
-                                var payload = tag.ActionPayload || {};
                                 var dataStr = '';
-                                if (tag.ActionType === 'play_media' && payload.itemId) dataStr = payload.itemId;
-                                else if (tag.ActionType === 'change_page' && payload.url) dataStr = payload.url;
+                                if (tag.ActionType === 'playmedia') dataStr = tag.data || '';
+                                else if (tag.ActionType === 'changepage') dataStr = tag.data || '';
 
                                 if (tag.TagName === tag.TagId) tag.TagName = Math.random().toString(36).substring(2, 8);
                                 var haBadge = tag.isFromHA ? '<small style="color:#4fc3f7;">[Home Assistant]</small> ' : '';
