@@ -8,7 +8,8 @@
   "main": "server.js",
   "scripts": {
     "server": "node server.js",
-    "checkrun": "ps aux | grep -E 'node|telerising'"
+    "checkrun": "ps aux | grep -E 'node|telerising'",
+    "rmoldweb": "rm *.css *.js *.json *.woff2 *.png *.jpg *.txt *.ttf *.ico *.woff *.wasm *.eot *.gif index.html & rm -r themes libraries assets favicons"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.3",

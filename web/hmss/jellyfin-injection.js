@@ -1,5 +1,9 @@
 const showCustomMenu = true;
 
+
+// is State
+var hasEruda = false;
+
 const hmssMenuItems = [
     {
         title: "NFC",
@@ -65,18 +69,24 @@ function createFeaturesButton() {
     popup.style.cssText = "display:none;position:fixed;bottom:44px;right:12px;z-index:10000;background:rgba(20,20,20,0.95);border:1px solid #444;border-radius:10px;padding:8px 0;min-width:180px;backdropFilter:blur(8px);";
 
     var items = [
-        { label: "Change Design", icon: "palette", action: function () {
-            localStorage.removeItem("HMSSDesign");
-            location.href = "/web/alt_index.html";
-        }},
-        { label: "NFC", icon: "nfc", action: function () {
-            popup.style.display = "none";
-            startNFCScanner();
-        }},
-        { label: "Remote Debugging", icon: "bug_report", action: function () {
-            popup.style.display = "none";
-            toggleRemoteDebug();
-        }}
+        {
+            label: "Change Design", icon: "palette", action: function () {
+                localStorage.removeItem("HMSSDesign");
+                location.href = "/web/alt_index.html";
+            }
+        },
+        {
+            label: "NFC", icon: "nfc", action: function () {
+                popup.style.display = "none";
+                startNFCScanner();
+            }
+        },
+        {
+            label: "Remote Debugging", icon: "bug_report", action: function () {
+                popup.style.display = "none";
+                toggleRemoteDebug();
+            }
+        }
     ];
 
     items.forEach(function (item, i) {
@@ -167,6 +177,17 @@ function toggleRemoteDebug() {
         return;
     }
 
+    if (!hasEruda) {
+        const script = document.createElement("script");
+        script.src = "/eruda";
+        script.onload = () => {
+            eruda.init();
+        };
+        document.head.appendChild(script);
+
+        hasEruda = true;
+    }
+
     var userId = window.ApiClient?.getCurrentUserId() || "";
     if (!userId) { showToast("Not logged in", true); return; }
 
@@ -187,7 +208,7 @@ function toggleRemoteDebug() {
                     method: "POST",
                     headers: getAuthHeaders(),
                     body: JSON.stringify({ level: level, message: msg, timestamp: new Date().toISOString() })
-                }).catch(function () {});
+                }).catch(function () { });
             };
 
             console.log = function () { _remoteDebugOriginals.log.apply(console, arguments); send("log", arguments); };
@@ -347,11 +368,3 @@ pageObserver.observe(document.body, {
     childList: true,
     subtree: true
 });
-
-const script = document.createElement("script");
-script.src = "/eruda";
-if (false) script.onload = () => {
-  eruda.init();
-};
-
-document.head.appendChild(script);
