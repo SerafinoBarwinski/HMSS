@@ -21,6 +21,7 @@ import { telerisingRoutes, startTelerisingIfAutostart } from "./src/backend/tele
 import { startDiscovery } from "./src/backend/discovery.js"
 import { WebSocketServer } from "ws";
 
+process.stdout.write("\x1b]0;HMSS Server\x07");
 enableConsoleFileLogger("./logs/server.log")
 console.log("=".repeat(50))
 console.log("The server is starting up...");

@@ -45,31 +45,28 @@
         <p>Home Media Streaming Service</p>
         <small>By Serafino Barwinski</small>
     </div>
-    <div class="center">
+    <div class="center content-primary">
         <h1>Welcome to HMSS</h1>
-        <strong id="InformTextWhichDesign">HMSS offers the option to use the Jellyfin design or the HMSS design. Which
+        <p id="InformTextWhichDesign">HMSS offers the option to use the Jellyfin design or the HMSS design. Which
             one
-            would you like to use?</strong><br>
-        <button id="useJDesign" class="JButton">Jellyfin´s Design</button><button id="useHMSSDesign"
-            class="HButton">HMSS Design</button>
-        <label for="remember">Remember decision?</label>
-        <input type="checkbox" id="remember">
+            would you like to use?</p><br>
+        <button id="useJDesign" is="emby-button">Jellyfin´s Design</button>
+        <button id="useHMSSDesign" is="emby-button">HMSS Design</button>
     </div>
     <script>
         var currDesign = localStorage.getItem("HMSSDesign")
-        const remember = document.getElementById("remember")
         if (currDesign == "J") {
             window.location.replace("/web/index.html");
         } else if (currDesign == "H") {
             // HMSS frontend — coming soon
         } else {
             document.getElementById("useJDesign").addEventListener("click", () => {
-                if (remember.checked) localStorage.setItem("HMSSDesign", "J");
+                localStorage.setItem("HMSSDesign", "J");
                 window.location.replace("/web/index.html");
             });
             document.getElementById("useHMSSDesign").addEventListener("click", () => {
                 alert("Not Implemented yet");
-		//if (remember.checked) localStorage.setItem("HMSSDesign", "H");
+		        //localStorage.setItem("HMSSDesign", "H");
                 // HMSS frontend — coming soon
             });
         }

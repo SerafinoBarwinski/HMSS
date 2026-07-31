@@ -27,8 +27,402 @@ let AudioStreamingIndexCach = [{}]
 // { userID: [{movieID:AudioStreamingIndex}] }
 
 let _liveTvCache = { channels: [], ts: 0 };
+    function getLiveTvConfig(db) {
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+        return stored.livetv || {
+            EnableRecordingSubfolders: false,
+            EnableOriginalAudioWithEncodedRecordings: false,
+            TunerHosts: [],
+            ListingProviders: [],
+            PrePaddingSeconds: 0,
+            PostPaddingSeconds: 0,
+            MediaLocationsCreated: [],
+            RecordingPostProcessorArguments: "",
+            SaveRecordingNFO: true,
+            SaveRecordingImages: true,
+            ChannelMappings: [],
+        };
+    }
+
+    function setLiveTvConfig(db, config) {
+        const sys = getSystemInfo(db);
+        let stored = {};
+        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+        stored.livetv = config;
+        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
+    }
+
+    // --- LiveTV channel cache ---
+    async function getLiveTvChannels(db) {
+        if (Date.now() - _liveTvCache.ts < 30000 && _liveTvCache.channels.length > 0) return _liveTvCache.channels;
+        const config = getLiveTvConfig(db);
+        if (!config.TunerHosts || config.TunerHosts.length === 0) { _liveTvCache = { channels: [], ts: Date.now() }; return []; }
+        const serverId = getSystemInfo(db)?.id || "hmss-local";
+        const all = [];
+        for (const host of config.TunerHosts) {
+            if (!host.Url) continue;
+            try {
+                const m3u = await fetchM3U(host.Url);
+                const parsed = parseM3U(m3u);
+                for (const ch of parsed) {
+                    all.push({
+                        Name: ch.name,
+                        ServerId: serverId,
+                        Id: ch.id,
+                        TvgId: ch.tvgId || "",
+                        SortName: ch.name.toLowerCase(),
+                        IsFolder: false,
+                        Type: "TvChannel",
+                        LocationType: "Remote",
+                        MediaType: "Video",
+                        MediaSources: [{
+                            Protocol: "Stream",
+                            Id: ch.id,
+                            Name: ch.name,
+                            Path: ch.url,
+                            Type: "Default",
+                            Container: "hls",
+                            IsRemote: true,
+                            SupportsDirectPlay: true,
+                            SupportsDirectStream: true,
+                            SupportsTranscoding: false,
+                        }],
+                        ImageTags: ch.logo ? { Primary: ch.id } : {},
+                        LogoUrl: ch.logo || "",
+                        Overview: "",
+                        ParentId: "",
+                        GenreItems: [],
+                        Genres: [ch.group],
+                        Tags: [],
+                        UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false },
+                    });
+                }
+            } catch { }
+        }
+        _liveTvCache = { channels: all, ts: Date.now() };
+        return all;
+    }
+
+    function fetchM3U(url) {
+        return new Promise((resolve, reject) => {
+            http.get(url, { timeout: 10000 }, (res) => {
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    return fetchM3U(res.headers.location).then(resolve, reject);
+                }
+                let body = "";
+                res.on("data", (c) => body += c);
+                res.on("end", () => {
+                    if (telerising.isTelerisingUnavailable(body)) {
+                        const m = url.match(/\/api\/([^/]+)\//);
+                        if (m) {
+                            console.log(`[Telerising] fetchM3U session expired for '${m[1]}' — refreshing...`);
+                            telerising.refreshSession(m[1]);
+                        }
+                    }
+                    resolve(body);
+                });
+            }).on("error", reject);
+        });
+    }
+
+    function parseM3U(content) {
+        const lines = content.split("\n").map(l => l.trim()).filter(Boolean);
+        const channels = [];
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].startsWith("#EXTINF:")) {
+                const inf = lines[i];
+                const url = lines[i + 1];
+                if (!url || url.startsWith("#")) continue;
+
+                const nameMatch = inf.match(/,\s*(.+)$/);
+                const name = nameMatch ? nameMatch[1].trim() : "Unknown";
+                const logoMatch = inf.match(/tvg-logo="([^"]+)"/);
+                const logo = logoMatch ? logoMatch[1] : "";
+                const groupMatch = inf.match(/group-title="([^"]+)"/);
+                const group = groupMatch ? groupMatch[1] : "General";
+                const idMatch = inf.match(/tvg-id="([^"]+)"/);
+                const tvgId = idMatch ? idMatch[1] : "";
+                const chnoMatch = inf.match(/tvg-chno="([^"]+)"/);
+                const chno = chnoMatch ? parseInt(chnoMatch[1]) : 0;
+
+                const id = generateItemId(name + url);
+                channels.push({ id, name, logo, group, tvgId, chno, url });
+            }
+        }
+        return channels;
+    }
+
+let _epgCache = { programmes: [], ts: 0, providerId: "" };
+
+function _nextPk(buf, start) {
+    for (var i = start; i < buf.length - 4; i++) {
+        if (buf[i] === 0x50 && buf[i+1] === 0x4b) {
+            var tag = buf[i+2] << 8 | buf[i+3];
+            if (tag === 0x0304 || tag === 0x0102 || tag === 0x0506) return i;
+        }
+    }
+    return -1;
+}
+
+function _parseZipEntry(buf) {
+    if (buf.length < 30) return null;
+    var sig = buf.readUInt32LE(0);
+    if (sig !== 0x04034b50) return null;
+    var flags = buf.readUInt16LE(6);
+    var method = buf.readUInt16LE(8);
+    var hasDataDesc = !!(flags & 8);
+    var compSize = buf.readUInt32LE(18);
+    var uncompSize = buf.readUInt32LE(22);
+    var fnameLen = buf.readUInt16LE(26);
+    var extraLen = buf.readUInt16LE(28);
+    var hdrSize = 30 + fnameLen + extraLen;
+    var fileName = buf.slice(30, 30 + fnameLen).toString("utf-8").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
+    var dataStart = hdrSize, dataEnd;
+    if (!hasDataDesc && compSize > 0) {
+        dataEnd = dataStart + compSize;
+    } else {
+        var next = _nextPk(buf, hdrSize + 2);
+        dataEnd = next > 0 ? next : buf.length;
+    }
+    if (dataEnd > buf.length) dataEnd = buf.length;
+    if (dataEnd <= dataStart) return null;
+    var raw = buf.slice(dataStart, dataEnd);
+    if (method === 0) return { data: raw, name: fileName, comp: raw.length, uncomp: raw.length };
+    if (method === 8) {
+        try {
+            var dec = zlib.inflateRawSync(raw, { maxOutputLength: 209715200 });
+            return { data: dec, name: fileName, comp: raw.length, uncomp: dec.length };
+        } catch (e) { return null; }
+    }
+    return null;
+}
+
+function _parseTarEntry(buf, offset) {
+    if (offset + 512 > buf.length) return null;
+    var name = buf.slice(offset, offset + 100).toString("utf-8").replace(/\0.*$/, "");
+    if (!name) return null;
+    var sizeStr = buf.slice(offset + 124, offset + 136).toString("utf-8").replace(/\0.*$/, "").trim();
+    var size = parseInt(sizeStr, 8);
+    if (isNaN(size) || size < 0 || offset + 512 + size > buf.length) return null;
+    var data = buf.slice(offset + 512, offset + 512 + size);
+    var padded = (size + 511) & ~511;
+    return { data, name, nextOffset: offset + 512 + padded };
+}
+
+function _decompressBuffer(buf, depth) {
+    if (buf.length < 4) return buf;
+    if (depth > 3) return null;
+    if (buf.length > 209715200) return null;
+    if (buf[0] === 0x1f && buf[1] === 0x8b) {
+        try {
+            var dec = zlib.gunzipSync(buf, { maxOutputLength: 209715200 });
+            return _decompressBuffer(dec, depth + 1);
+        } catch (e) { return buf; }
+    }
+    if (buf[0] === 0x78 && (buf[1] === 0x01 || buf[1] === 0x9c || buf[1] === 0xda)) {
+        try {
+            var dec = zlib.inflateSync(buf, { maxOutputLength: 209715200 });
+            return _decompressBuffer(dec, depth + 1);
+        } catch (e) { return buf; }
+    }
+    if (buf[0] === 0x1f && buf[1] === 0x9d) {
+        try {
+            var dec = zlib.unzipSync(buf, { maxOutputLength: 209715200 });
+            return _decompressBuffer(dec, depth + 1);
+        } catch (e) { return buf; }
+    }
+    if (buf[0] >= 0x10 && buf[0] <= 0x1f && buf[1] >= 0x00 && buf[1] <= 0x08) return buf;
+    if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
+        var off = 0;
+        while (off < buf.length) {
+            var entry = _parseZipEntry(buf.slice(off));
+            if (!entry) break;
+            var entryHdr = 30 + buf.readUInt16LE(off + 26) + buf.readUInt16LE(off + 28);
+            var entryFull = entryHdr + entry.comp;
+            if (!entry.name || entry.name.startsWith(".") || entry.name.startsWith("__MACOSX")) { off += entryFull; continue; }
+            if (entry.comp > 0 && entry.uncomp > 0 && entry.uncomp / entry.comp > 500) return null;
+            return _decompressBuffer(entry.data, depth + 1);
+        }
+        return buf;
+    }
+    return buf;
+}
+
+async function _fetchFeed(url) {
+    var resp = await fetch(url);
+    if (!resp.ok) return null;
+    var buf = Buffer.from(await resp.arrayBuffer());
+    if (!buf.length) return null;
+    var decompressed = _decompressBuffer(buf, 0);
+    if (!decompressed || !decompressed.length) return null;
+    if (decompressed.length > 209715200) return null;
+    return decompressed;
+}
+
+function _parseXmltvDate(str) {
+    if (!str) return null;
+    var m = str.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{2})(\d{2})$/);
+    if (!m) return new Date(str).toISOString();
+    var offsetHours = parseInt(m[7]), offsetMins = parseInt(m[8]);
+    var sign = offsetHours < 0 ? "-" : "+";
+    var absH = Math.abs(offsetHours);
+    var tz = sign + String(absH).padStart(2, "0") + ":" + String(offsetMins).padStart(2, "0");
+    return m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":" + m[6] + tz;
+}
+
+function _xmltvTicks(startStr, stopStr) {
+    if (!startStr || !stopStr) return 0;
+    var s = new Date(_parseXmltvDate(startStr)).getTime();
+    var e = new Date(_parseXmltvDate(stopStr)).getTime();
+    if (isNaN(s) || isNaN(e)) return 0;
+    return (e - s) * 10000;
+}
+
+async function _fetchEpgProgrammes(config, providerId) {
+    if (_epgCache.providerId === providerId && Date.now() - _epgCache.ts < 300000 && _epgCache.programmes.length > 0) {
+        return _epgCache.programmes;
+    }
+    var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
+    if (!provider || !provider.Path) return [];
+    try {
+        var raw = await _fetchFeed(provider.Path);
+        if (!raw) return [];
+        var text = raw.toString("utf-8");
+        text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
+        var firstLt = text.indexOf("<");
+        if (firstLt > 0) text = text.substring(firstLt);
+        text = text.replace(/<\?xml[\s\S]*?\?>/g, "").replace(/<!DOCTYPE[\s\S]*?>/g, "").trim();
+        if (text.charAt(0) !== "<") return [];
+        var { SaxesParser } = await import("saxes");
+        var parser = new SaxesParser({ lowercase: true });
+        var programmes = [];
+        var currentProgramme = null;
+        parser.on("opentag", function (node) {
+            if (node.name === "programme") {
+                currentProgramme = {
+                    channel: node.attributes.channel || "",
+                    start: node.attributes.start || "",
+                    stop: node.attributes.stop || "",
+                };
+            } else if (currentProgramme) {
+                if (node.name === "icon" && node.attributes && node.attributes.src && !currentProgramme.icon) {
+                    currentProgramme.icon = node.attributes.src;
+                    currentProgramme._cap = null;
+                } else if (node.name === "title" && !currentProgramme.title) currentProgramme._cap = "title";
+                else if (node.name === "sub-title" && !currentProgramme.subtitle) currentProgramme._cap = "subtitle";
+                else if (node.name === "date" && !currentProgramme.date) currentProgramme._cap = "date";
+                else if (node.name === "category" && !currentProgramme.category) currentProgramme._cap = "category";
+                else currentProgramme._cap = null;
+            }
+        });
+        parser.on("text", function (txt) {
+            if (currentProgramme && currentProgramme._cap) {
+                if (!currentProgramme[currentProgramme._cap]) currentProgramme[currentProgramme._cap] = "";
+                currentProgramme[currentProgramme._cap] += txt;
+            }
+        });
+        parser.on("cdata", function (txt) {
+            if (currentProgramme && currentProgramme._cap) {
+                if (!currentProgramme[currentProgramme._cap]) currentProgramme[currentProgramme._cap] = "";
+                currentProgramme[currentProgramme._cap] += txt;
+            }
+        });
+        parser.on("closetag", function (node) {
+            if (!currentProgramme) return;
+            if (node.name === "programme") {
+                programmes.push(currentProgramme);
+                currentProgramme = null;
+            } else {
+                currentProgramme._cap = null;
+            }
+        });
+        parser.write(text).close();
+        _epgCache = { programmes, ts: Date.now(), providerId };
+        return programmes;
+    } catch (e) {
+        console.error("EPG fetch error:", e);
+        return [];
+    }
+}
+
+async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tunerChannels, serverId) {
+    if (!provider) return [];
+    var xmltvToTuner = {};
+    (config.ChannelMappings || []).forEach(function (m) {
+        if (m.ProviderId === provider.Id && m.ProviderChannelId && m.TunerChannelId) {
+            xmltvToTuner[m.ProviderChannelId] = m.TunerChannelId;
+        }
+    });
+    var programmes = await _fetchEpgProgrammes(config, provider.Id);
+    var items = [], seen = {};
+    var tunerByTvgId = {}, tunerByChId = {};
+    if (Object.keys(xmltvToTuner).length === 0 && tunerChannels) {
+        for (var ci = 0; ci < tunerChannels.length; ci++) {
+            if (tunerChannels[ci].TvgId) tunerByTvgId[tunerChannels[ci].TvgId] = tunerChannels[ci].Id;
+        }
+    }
+    for (var ci = 0; ci < tunerChannels.length; ci++) {
+        tunerByChId[tunerChannels[ci].Id] = tunerChannels[ci];
+    }
+    for (var i = 0; i < programmes.length; i++) {
+        var p = programmes[i];
+        var channelId = xmltvToTuner[p.channel];
+        if (!channelId) channelId = tunerByTvgId[p.channel];
+        if (!channelId) continue;
+        if (requestedIds.length > 0 && !requestedIds.includes(channelId)) continue;
+        var startDate = _parseXmltvDate(p.start);
+        var endDate = _parseXmltvDate(p.stop);
+        if (!startDate || !endDate) continue;
+        var startMs = new Date(startDate).getTime();
+        var endMs = new Date(endDate).getTime();
+        if (isNaN(startMs) || isNaN(endMs)) continue;
+        if (endMs < minEnd || startMs > maxStart) continue;
+        var name = p.title || "Unknown";
+        var id = generateItemId(name + p.channel + p.start);
+        if (seen[id]) continue;
+        seen[id] = true;
+        var ch = tunerByChId[channelId];
+        var item = { Id: id, Name: name, ServerId: serverId || "hmss-local", ChannelId: channelId, Type: "Program", MediaType: "Unknown", StartDate: startDate, EndDate: endDate, RunTimeTicks: _xmltvTicks(p.start, p.stop) };
+        if (ch && ch.LogoUrl) {
+            item.ImageTags = { Primary: ch.Id };
+            item.PrimaryImageAspectRatio = 1.333;
+            item.ChannelPrimaryImageTag = ch.Id;
+            item.ImageBlurHashes = { Primary: {} };
+        } else {
+            item.ImageTags = {};
+            item.ImageBlurHashes = {};
+        }
+        if (p.subtitle) item.EpisodeTitle = p.subtitle;
+        if (p.date) { var year = parseInt(p.date); if (!isNaN(year) && year > 1900 && year < 2100) item.ProductionYear = year; }
+        if (p.category) { var cat = p.category.toLowerCase(); if (cat === "series" || cat === "serie" || cat.includes("series") || cat.includes("serie")) item.IsSeries = true; else if (cat === "movie" || cat.includes("movie") || cat.includes("film")) item.IsMovie = true; else if (cat === "news" || cat.includes("news")) item.IsNews = true; else if (cat === "sports" || cat.includes("sport")) item.IsSports = true; else if (cat === "kids" || cat.includes("kids") || cat.includes("children")) item.IsKids = true; }
+        items.push(item);
+    }
+    items.sort(function (a, b) { return new Date(a.StartDate).getTime() - new Date(b.StartDate).getTime(); });
+    return items;
+}
+
 function findLiveTvChannel(itemId) {
     return _liveTvCache.channels.find(c => c.Id === itemId) || null;
+}
+
+function proxyLiveTvLogo(res, logoUrl) {
+    const client = logoUrl.startsWith("https") ? https : http;
+    client.get(logoUrl, { timeout: 8000 }, (upstream) => {
+        if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
+            return proxyLiveTvLogo(res, upstream.headers.location);
+        }
+        const ct = upstream.headers["content-type"];
+        const mime = typeof ct === "string" && /^image\//i.test(ct) ? ct
+            : /\.png(\?|$)/i.test(logoUrl) ? "image/png"
+            : /\.webp(\?|$)/i.test(logoUrl) ? "image/webp"
+            : /\.svg(\?|$)/i.test(logoUrl) ? "image/svg+xml"
+            : /\.(jpe?g)(\?|$)/i.test(logoUrl) ? "image/jpeg"
+            : "image/png";
+        res.set("Content-Type", mime);
+        upstream.pipe(res);
+    }).on("error", () => res.status(404).end());
 }
 function resolveParentId(pid) {
     if (!pid) return null;
@@ -341,28 +735,28 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         ]);
     });
 
-    app.get("/Items/:itemId/Images/Primary", (req, res) => {
-        serveItemImage(req, res, "Primary");
+    app.get("/Items/:itemId/Images/Primary", async (req, res) => {
+        try { await serveItemImage(req, res, "Primary"); } catch (e) { if (server.DEBUG_GENEREL) console.log("[IMG-DBG] error:", e?.stack || e); res.status(404).end(); }
     });
 
-    app.get("/Items/:itemId/Images/Backdrop", (req, res) => {
-        serveItemImage(req, res, "Backdrop");
+    app.get("/Items/:itemId/Images/Backdrop", async (req, res) => {
+        try { await serveItemImage(req, res, "Backdrop"); } catch { res.status(404).end(); }
     });
 
-    app.get("/Items/:itemId/Images/Thumb", (req, res) => {
-        serveItemImage(req, res, "Thumb");
+    app.get("/Items/:itemId/Images/Thumb", async (req, res) => {
+        try { await serveItemImage(req, res, "Thumb"); } catch { res.status(404).end(); }
     });
 
-    app.get("/Users/:userId/Items/:itemId/Images/Primary", (req, res) => {
-        serveItemImage(req, res, "Primary");
+    app.get("/Users/:userId/Items/:itemId/Images/Primary", async (req, res) => {
+        try { await serveItemImage(req, res, "Primary"); } catch { res.status(404).end(); }
     });
 
-    app.get("/Users/:userId/Items/:itemId/Images/Backdrop", (req, res) => {
-        serveItemImage(req, res, "Backdrop");
+    app.get("/Users/:userId/Items/:itemId/Images/Backdrop", async (req, res) => {
+        try { await serveItemImage(req, res, "Backdrop"); } catch { res.status(404).end(); }
     });
 
-    app.get("/Users/:userId/Items/:itemId/Images/Thumb", (req, res) => {
-        serveItemImage(req, res, "Thumb");
+    app.get("/Users/:userId/Items/:itemId/Images/Thumb", async (req, res) => {
+        try { await serveItemImage(req, res, "Thumb"); } catch { res.status(404).end(); }
     });
 
     app.get("/web/ConfigurationPages", (req, res) => {
@@ -470,8 +864,43 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
     });
 
-    function serveItemImage(req, res, imageType) {
+    async function findProgramChannel(rawId) {
+        const db = getDb();
+        const config = getLiveTvConfig(db);
+        const provider = (config.ListingProviders || [])[0];
+        if (server.DEBUG_GENEREL) console.log("[PGM-DBG] findProgramChannel rawId=", rawId, "provider=", provider?.Id);
+        if (!provider) return null;
+        const programmes = await _fetchEpgProgrammes(config, provider.Id);
+        if (server.DEBUG_GENEREL) console.log("[PGM-DBG] programmes=", programmes.length);
+        for (const p of programmes) {
+            const name = p.title || "Unknown";
+            const pid = generateItemId(name + p.channel + p.start);
+            if (pid !== rawId) continue;
+            if (server.DEBUG_GENEREL) console.log("[PGM-DBG] match p.channel=", p.channel, "name=", name, "icon=", p.icon);
+            if (p.icon) return p.icon;
+            const tvChannels = await getLiveTvChannels(db);
+            if (server.DEBUG_GENEREL) console.log("[PGM-DBG] channels=", tvChannels.length);
+            let chId = null;
+            (config.ChannelMappings || []).forEach(m => {
+                if (m.ProviderId === provider.Id && m.ProviderChannelId === p.channel) chId = m.TunerChannelId;
+            });
+            if (!chId) {
+                for (const c of tvChannels) {
+                    if (c.TvgId === p.channel) { chId = c.Id; break; }
+                }
+            }
+            if (server.DEBUG_GENEREL) console.log("[PGM-DBG] chId=", chId);
+            if (!chId) return null;
+            const ch = tvChannels.find(c => c.Id === chId) || null;
+            if (server.DEBUG_GENEREL) console.log("[PGM-DBG] ch=", ch?.Name, "logo=", ch?.LogoUrl);
+            return ch?.LogoUrl || null;
+        }
+        return null;
+    }
+
+    async function serveItemImage(req, res, imageType) {
         const rawId = (req.params.itemId || "").replace(/-/g, "");
+        if (server.DEBUG_GENEREL) console.log("[IMG-DBG] serveItemImage", rawId, imageType, req.query.tag);
 
         // resolve library-level IDs to a random item from that library
         const LIB_LOOKUP = {
@@ -510,20 +939,13 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         // LiveTV channel logo proxy
         const tvChannel = findLiveTvChannel(rawId);
         if (tvChannel && tvChannel.LogoUrl) {
-            const logoUrl = tvChannel.LogoUrl;
-            const client = logoUrl.startsWith("https") ? https : http;
-            return client.get(logoUrl, { timeout: 8000 }, (upstream) => {
-                if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
-                    const redir = upstream.headers.location;
-                    const rp = redir.startsWith("https") ? https : http;
-                    return rp.get(redir, { timeout: 8000 }, (r2) => {
-                        res.set("Content-Type", r2.headers["content-type"] || "image/png");
-                        r2.pipe(res);
-                    }).on("error", () => res.status(404).end());
-                }
-                res.set("Content-Type", upstream.headers["content-type"] || "image/png");
-                upstream.pipe(res);
-            }).on("error", () => res.status(404).end());
+            return proxyLiveTvLogo(res, tvChannel.LogoUrl);
+        }
+
+        // LiveTV programme -> programme preview image (or channel logo fallback)
+        const progImage = await findProgramChannel(rawId);
+        if (progImage) {
+            return proxyLiveTvLogo(res, progImage);
         }
 
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
@@ -2433,132 +2855,6 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.post('/Library/VirtualFolders/Paths/Update', (req, res) => { /* UpdateMediaPath */ res.status(200).json({ message: 'Not implemented' }); });
 
     // === LiveTv ===
-    function getLiveTvConfig(db) {
-        const sys = getSystemInfo(db);
-        let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
-        return stored.livetv || {
-            EnableRecordingSubfolders: false,
-            EnableOriginalAudioWithEncodedRecordings: false,
-            TunerHosts: [],
-            ListingProviders: [],
-            PrePaddingSeconds: 0,
-            PostPaddingSeconds: 0,
-            MediaLocationsCreated: [],
-            RecordingPostProcessorArguments: "",
-            SaveRecordingNFO: true,
-            SaveRecordingImages: true,
-            ChannelMappings: [],
-        };
-    }
-
-    function setLiveTvConfig(db, config) {
-        const sys = getSystemInfo(db);
-        let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
-        stored.livetv = config;
-        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
-    }
-
-    // --- LiveTV channel cache ---
-    async function getLiveTvChannels(db) {
-        if (Date.now() - _liveTvCache.ts < 30000 && _liveTvCache.channels.length > 0) return _liveTvCache.channels;
-        const config = getLiveTvConfig(db);
-        if (!config.TunerHosts || config.TunerHosts.length === 0) { _liveTvCache = { channels: [], ts: Date.now() }; return []; }
-        const serverId = getSystemInfo(db)?.id || "hmss-local";
-        const all = [];
-        for (const host of config.TunerHosts) {
-            if (!host.Url) continue;
-            try {
-                const m3u = await fetchM3U(host.Url);
-                const parsed = parseM3U(m3u);
-                for (const ch of parsed) {
-                    all.push({
-                        Name: ch.name,
-                        ServerId: serverId,
-                        Id: ch.id,
-                        TvgId: ch.tvgId || "",
-                        SortName: ch.name.toLowerCase(),
-                        IsFolder: false,
-                        Type: "TvChannel",
-                        LocationType: "Remote",
-                        MediaType: "Video",
-                        MediaSources: [{
-                            Protocol: "Stream",
-                            Id: ch.id,
-                            Name: ch.name,
-                            Path: ch.url,
-                            Type: "Default",
-                            Container: "hls",
-                            IsRemote: true,
-                            SupportsDirectPlay: true,
-                            SupportsDirectStream: true,
-                            SupportsTranscoding: false,
-                        }],
-                        ImageTags: ch.logo ? { Primary: ch.id } : {},
-                        LogoUrl: ch.logo || "",
-                        Overview: "",
-                        ParentId: "",
-                        GenreItems: [],
-                        Genres: [ch.group],
-                        Tags: [],
-                        UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false },
-                    });
-                }
-            } catch { }
-        }
-        _liveTvCache = { channels: all, ts: Date.now() };
-        return all;
-    }
-
-    function fetchM3U(url) {
-        return new Promise((resolve, reject) => {
-            http.get(url, { timeout: 10000 }, (res) => {
-                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                    return fetchM3U(res.headers.location).then(resolve, reject);
-                }
-                let body = "";
-                res.on("data", (c) => body += c);
-                res.on("end", () => {
-                    if (telerising.isTelerisingUnavailable(body)) {
-                        const m = url.match(/\/api\/([^/]+)\//);
-                        if (m) {
-                            console.log(`[Telerising] fetchM3U session expired for '${m[1]}' — refreshing...`);
-                            telerising.refreshSession(m[1]);
-                        }
-                    }
-                    resolve(body);
-                });
-            }).on("error", reject);
-        });
-    }
-
-    function parseM3U(content) {
-        const lines = content.split("\n").map(l => l.trim()).filter(Boolean);
-        const channels = [];
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].startsWith("#EXTINF:")) {
-                const inf = lines[i];
-                const url = lines[i + 1];
-                if (!url || url.startsWith("#")) continue;
-
-                const nameMatch = inf.match(/,\s*(.+)$/);
-                const name = nameMatch ? nameMatch[1].trim() : "Unknown";
-                const logoMatch = inf.match(/tvg-logo="([^"]+)"/);
-                const logo = logoMatch ? logoMatch[1] : "";
-                const groupMatch = inf.match(/group-title="([^"]+)"/);
-                const group = groupMatch ? groupMatch[1] : "General";
-                const idMatch = inf.match(/tvg-id="([^"]+)"/);
-                const tvgId = idMatch ? idMatch[1] : "";
-                const chnoMatch = inf.match(/tvg-chno="([^"]+)"/);
-                const chno = chnoMatch ? parseInt(chnoMatch[1]) : 0;
-
-                const id = generateItemId(name + url);
-                channels.push({ id, name, logo, group, tvgId, chno, url });
-            }
-        }
-        return channels;
-    }
 
     app.get('/LiveTv/Info', (req, res) => {
         if (!req.user) return res.status(401).end();
@@ -3041,243 +3337,12 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         var maxStart = req.query.MaxStartDate ? new Date(req.query.MaxStartDate).getTime() : Infinity;
         var minEnd = req.query.MinEndDate ? new Date(req.query.MinEndDate).getTime() : 0;
         var tvChannels = await getLiveTvChannels(db);
-        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels);
+        var serverId = getSystemInfo(db)?.id || "hmss-local";
+        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels, serverId);
         var limit = parseInt(req.query.Limit || req.query.limit) || 0;
         res.json({ Items: limit > 0 ? items.slice(0, limit) : items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
-let _epgCache = { programmes: [], ts: 0, providerId: "" };
-
-function _nextPk(buf, start) {
-    for (var i = start; i < buf.length - 4; i++) {
-        if (buf[i] === 0x50 && buf[i+1] === 0x4b) {
-            var tag = buf[i+2] << 8 | buf[i+3];
-            if (tag === 0x0304 || tag === 0x0102 || tag === 0x0506) return i;
-        }
-    }
-    return -1;
-}
-
-function _parseZipEntry(buf) {
-    if (buf.length < 30) return null;
-    var sig = buf.readUInt32LE(0);
-    if (sig !== 0x04034b50) return null;
-    var flags = buf.readUInt16LE(6);
-    var method = buf.readUInt16LE(8);
-    var hasDataDesc = !!(flags & 8);
-    var compSize = buf.readUInt32LE(18);
-    var uncompSize = buf.readUInt32LE(22);
-    var fnameLen = buf.readUInt16LE(26);
-    var extraLen = buf.readUInt16LE(28);
-    var hdrSize = 30 + fnameLen + extraLen;
-    var fileName = buf.slice(30, 30 + fnameLen).toString("utf-8").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
-    var dataStart = hdrSize, dataEnd;
-    if (!hasDataDesc && compSize > 0) {
-        dataEnd = dataStart + compSize;
-    } else {
-        var next = _nextPk(buf, hdrSize + 2);
-        dataEnd = next > 0 ? next : buf.length;
-    }
-    if (dataEnd > buf.length) dataEnd = buf.length;
-    if (dataEnd <= dataStart) return null;
-    var raw = buf.slice(dataStart, dataEnd);
-    if (method === 0) return { data: raw, name: fileName, comp: raw.length, uncomp: raw.length };
-    if (method === 8) {
-        try {
-            var dec = zlib.inflateRawSync(raw, { maxOutputLength: 209715200 });
-            return { data: dec, name: fileName, comp: raw.length, uncomp: dec.length };
-        } catch (e) { return null; }
-    }
-    return null;
-}
-
-function _parseTarEntry(buf, offset) {
-    if (offset + 512 > buf.length) return null;
-    var name = buf.slice(offset, offset + 100).toString("utf-8").replace(/\0.*$/, "");
-    if (!name) return null;
-    var sizeStr = buf.slice(offset + 124, offset + 136).toString("utf-8").replace(/\0.*$/, "").trim();
-    var size = parseInt(sizeStr, 8);
-    if (isNaN(size) || size < 0 || offset + 512 + size > buf.length) return null;
-    var data = buf.slice(offset + 512, offset + 512 + size);
-    var padded = (size + 511) & ~511;
-    return { data, name, nextOffset: offset + 512 + padded };
-}
-
-function _decompressBuffer(buf, depth) {
-    if (buf.length < 4) return buf;
-    if (depth > 3) return null;
-    if (buf.length > 209715200) return null;
-    if (buf[0] === 0x1f && buf[1] === 0x8b) {
-        try {
-            var dec = zlib.gunzipSync(buf, { maxOutputLength: 209715200 });
-            return _decompressBuffer(dec, depth + 1);
-        } catch (e) { return buf; }
-    }
-    if (buf[0] === 0x78 && (buf[1] === 0x01 || buf[1] === 0x9c || buf[1] === 0xda)) {
-        try {
-            var dec = zlib.inflateSync(buf, { maxOutputLength: 209715200 });
-            return _decompressBuffer(dec, depth + 1);
-        } catch (e) { return buf; }
-    }
-    if (buf[0] === 0x1f && buf[1] === 0x9d) {
-        try {
-            var dec = zlib.unzipSync(buf, { maxOutputLength: 209715200 });
-            return _decompressBuffer(dec, depth + 1);
-        } catch (e) { return buf; }
-    }
-    if (buf[0] >= 0x10 && buf[0] <= 0x1f && buf[1] >= 0x00 && buf[1] <= 0x08) return buf;
-    if (buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) {
-        var off = 0;
-        while (off < buf.length) {
-            var entry = _parseZipEntry(buf.slice(off));
-            if (!entry) break;
-            var entryHdr = 30 + buf.readUInt16LE(off + 26) + buf.readUInt16LE(off + 28);
-            var entryFull = entryHdr + entry.comp;
-            if (!entry.name || entry.name.startsWith(".") || entry.name.startsWith("__MACOSX")) { off += entryFull; continue; }
-            if (entry.comp > 0 && entry.uncomp > 0 && entry.uncomp / entry.comp > 500) return null;
-            return _decompressBuffer(entry.data, depth + 1);
-        }
-        return buf;
-    }
-    return buf;
-}
-
-async function _fetchFeed(url) {
-    var resp = await fetch(url);
-    if (!resp.ok) return null;
-    var buf = Buffer.from(await resp.arrayBuffer());
-    if (!buf.length) return null;
-    var decompressed = _decompressBuffer(buf, 0);
-    if (!decompressed || !decompressed.length) return null;
-    if (decompressed.length > 209715200) return null;
-    return decompressed;
-}
-
-function _parseXmltvDate(str) {
-    if (!str) return null;
-    var m = str.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{2})(\d{2})$/);
-    if (!m) return new Date(str).toISOString();
-    var offsetHours = parseInt(m[7]), offsetMins = parseInt(m[8]);
-    var sign = offsetHours < 0 ? "-" : "+";
-    var absH = Math.abs(offsetHours);
-    var tz = sign + String(absH).padStart(2, "0") + ":" + String(offsetMins).padStart(2, "0");
-    return m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":" + m[6] + tz;
-}
-
-function _xmltvTicks(startStr, stopStr) {
-    if (!startStr || !stopStr) return 0;
-    var s = new Date(_parseXmltvDate(startStr)).getTime();
-    var e = new Date(_parseXmltvDate(stopStr)).getTime();
-    if (isNaN(s) || isNaN(e)) return 0;
-    return (e - s) * 10000;
-}
-
-async function _fetchEpgProgrammes(config, providerId) {
-    if (_epgCache.providerId === providerId && Date.now() - _epgCache.ts < 300000 && _epgCache.programmes.length > 0) {
-        return _epgCache.programmes;
-    }
-    var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
-    if (!provider || !provider.Path) return [];
-    try {
-        var raw = await _fetchFeed(provider.Path);
-        if (!raw) return [];
-        var text = raw.toString("utf-8");
-        text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
-        var firstLt = text.indexOf("<");
-        if (firstLt > 0) text = text.substring(firstLt);
-        text = text.replace(/<\?xml[\s\S]*?\?>/g, "").replace(/<!DOCTYPE[\s\S]*?>/g, "").trim();
-        if (text.charAt(0) !== "<") return [];
-        var { SaxesParser } = await import("saxes");
-        var parser = new SaxesParser({ lowercase: true });
-        var programmes = [];
-        var currentProgramme = null;
-        parser.on("opentag", function (node) {
-            if (node.name === "programme") {
-                currentProgramme = {
-                    channel: node.attributes.channel || "",
-                    start: node.attributes.start || "",
-                    stop: node.attributes.stop || "",
-                };
-            } else if (currentProgramme) {
-                if (node.name === "title" && !currentProgramme.title) currentProgramme._cap = "title";
-                else if (node.name === "sub-title" && !currentProgramme.subtitle) currentProgramme._cap = "subtitle";
-                else if (node.name === "date" && !currentProgramme.date) currentProgramme._cap = "date";
-                else if (node.name === "category" && !currentProgramme.category) currentProgramme._cap = "category";
-                else currentProgramme._cap = null;
-            }
-        });
-        parser.on("text", function (txt) {
-            if (currentProgramme && currentProgramme._cap) {
-                if (!currentProgramme[currentProgramme._cap]) currentProgramme[currentProgramme._cap] = "";
-                currentProgramme[currentProgramme._cap] += txt;
-            }
-        });
-        parser.on("cdata", function (txt) {
-            if (currentProgramme && currentProgramme._cap) {
-                if (!currentProgramme[currentProgramme._cap]) currentProgramme[currentProgramme._cap] = "";
-                currentProgramme[currentProgramme._cap] += txt;
-            }
-        });
-        parser.on("closetag", function (node) {
-            if (!currentProgramme) return;
-            if (node.name === "programme") {
-                programmes.push(currentProgramme);
-                currentProgramme = null;
-            } else {
-                currentProgramme._cap = null;
-            }
-        });
-        parser.write(text).close();
-        _epgCache = { programmes, ts: Date.now(), providerId };
-        return programmes;
-    } catch (e) {
-        console.error("EPG fetch error:", e);
-        return [];
-    }
-}
-
-async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tunerChannels) {
-    if (!provider) return [];
-    var xmltvToTuner = {};
-    (config.ChannelMappings || []).forEach(function (m) {
-        if (m.ProviderId === provider.Id && m.ProviderChannelId && m.TunerChannelId) {
-            xmltvToTuner[m.ProviderChannelId] = m.TunerChannelId;
-        }
-    });
-    var programmes = await _fetchEpgProgrammes(config, provider.Id);
-    var items = [], seen = {};
-    var tunerByTvgId = {};
-    if (Object.keys(xmltvToTuner).length === 0 && tunerChannels) {
-        for (var ci = 0; ci < tunerChannels.length; ci++) {
-            if (tunerChannels[ci].TvgId) tunerByTvgId[tunerChannels[ci].TvgId] = tunerChannels[ci].Id;
-        }
-    }
-    for (var i = 0; i < programmes.length; i++) {
-        var p = programmes[i];
-        var channelId = xmltvToTuner[p.channel];
-        if (!channelId) channelId = tunerByTvgId[p.channel];
-        if (!channelId) continue;
-        if (requestedIds.length > 0 && !requestedIds.includes(channelId)) continue;
-        var startDate = _parseXmltvDate(p.start);
-        var endDate = _parseXmltvDate(p.stop);
-        if (!startDate || !endDate) continue;
-        var startMs = new Date(startDate).getTime();
-        var endMs = new Date(endDate).getTime();
-        if (isNaN(startMs) || isNaN(endMs)) continue;
-        if (endMs < minEnd || startMs > maxStart) continue;
-        var name = p.title || "Unknown";
-        var id = generateItemId(name + p.channel + p.start);
-        if (seen[id]) continue;
-        seen[id] = true;
-        var item = { Id: id, Name: name, ServerId: "hmss", ChannelId: channelId, Type: "Program", MediaType: "Unknown", StartDate: startDate, EndDate: endDate, RunTimeTicks: _xmltvTicks(p.start, p.stop), ImageBlurHashes: {} };
-        if (p.subtitle) item.EpisodeTitle = p.subtitle;
-        if (p.date) { var year = parseInt(p.date); if (!isNaN(year) && year > 1900 && year < 2100) item.ProductionYear = year; }
-        if (p.category) { var cat = p.category.toLowerCase(); if (cat === "series" || cat === "serie" || cat.includes("series") || cat.includes("serie")) item.IsSeries = true; else if (cat === "movie" || cat.includes("movie") || cat.includes("film")) item.IsMovie = true; else if (cat === "news" || cat.includes("news")) item.IsNews = true; else if (cat === "sports" || cat.includes("sport")) item.IsSports = true; else if (cat === "kids" || cat.includes("kids") || cat.includes("children")) item.IsKids = true; }
-        items.push(item);
-    }
-    items.sort(function (a, b) { return new Date(a.StartDate).getTime() - new Date(b.StartDate).getTime(); });
-    return items;
-}
 
     app.post('/LiveTv/Programs', async (req, res) => {
         if (!req.user) return res.status(401).end();
@@ -3289,7 +3354,8 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         var maxStart = body.MaxStartDate ? new Date(body.MaxStartDate).getTime() : Infinity;
         var minEnd = body.MinEndDate ? new Date(body.MinEndDate).getTime() : 0;
         var tvChannels = await getLiveTvChannels(db);
-        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels);
+        var serverId = getSystemInfo(db)?.id || "hmss-local";
+        var items = await _queryEpg(config, provider, requestedIds, maxStart, minEnd, tvChannels, serverId);
         var limit = parseInt(body.Limit || body.limit) || 0;
         res.json({ Items: limit > 0 ? items.slice(0, limit) : items, TotalRecordCount: items.length, StartIndex: 0 });
     });
@@ -3330,8 +3396,9 @@ async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tuner
         var endDate = _parseXmltvDate(p.stop);
         var name = p.title || "Unknown";
         var id = generateItemId(name + p.channel + p.start);
+        var serverId = getSystemInfo(db)?.id || "hmss-local";
         var item = {
-            Name: name, ServerId: "hmss", Id: id,
+            Name: name, ServerId: serverId, Id: id,
             Etag: id, DateCreated: startDate,
             CanDelete: false, CanDownload: false,
             SortName: name.toLowerCase().replace(/\s+/g, ""),
