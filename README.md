@@ -86,6 +86,7 @@ migrated.
 - `--skip-integrity-check`: Skips the integrity check. **Can lead to
   unpredictable errors!**
 - `--i-am-a-tea-pot`: No coffee today
+- `--crash-on-startup`: Intentionally crash the Server on Startup
 
 ## Addons
 

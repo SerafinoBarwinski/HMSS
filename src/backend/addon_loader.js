@@ -346,6 +346,7 @@ export function resolveAddonLibraryFile(addonId, libName, relPath) {
 }
 
 export function registerAddonBackendRoutes(app, getDb, mediaDirs = {}) {
+    let registeredRoutes = [];
     for (const addon of addons) {
         if (typeof addon.module.registerRoutes !== "function") continue;
         try {
@@ -356,11 +357,12 @@ export function registerAddonBackendRoutes(app, getDb, mediaDirs = {}) {
                 mediaDirs,
                 libraries: addon.library || [],
             });
-            console.log(`Addon '${addon.id}': backend routes registered`);
+            registeredRoutes.push(addon.id);
         } catch (e) {
             console.warn(`Addon '${addon.id}': registerRoutes failed — ${e.message}`);
         }
     }
+    console.log(`Registered backend routes for addons: ${registeredRoutes.join(", ")}`);
 }
 
 export async function getMetadata(input) {

@@ -3,7 +3,7 @@ import { getUserNFCs, getNFCByTagId, addOrUpdateNFC, removeNFC } from "../../bac
 const HA_TAG_REGEX = /^https?:\/\/(www\.)?home-assistant\.io\/tag\/(.+)$/i;
 
 export async function init(config) {
-    console.log("[NFC] Addon loaded");
+     if (config?.verbose) console.log("[NFC] Addon loaded");
 }
 
 export function registerRoutes(app, { getDb }) {

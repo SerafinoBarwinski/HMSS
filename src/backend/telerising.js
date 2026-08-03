@@ -12,6 +12,8 @@ const BIN_PATH = path.resolve(__dirname, "../telerising/api");
 const SETTINGS_PATH = path.resolve(__dirname, "../telerising/settings.json");
 const CONFIG_FILES_DIR = path.resolve(__dirname, "../telerising/app/static/config_files");
 
+const PREF = "[TELE] ";
+
 export let telerisingProcess = null;
 export let telerisingPort = 5000;
 
@@ -241,18 +243,18 @@ export function telerisingRoutes(app, getDb, serverPort) {
         });
 
         telerisingProcess.on("error", (err) => {
-            console.error("Telerising process error:", err.message);
+            console.error(`${PREF}Telerising process error:`, err.message);
             telerisingProcess = null;
         });
 
         telerisingProcess.on("exit", (code) => {
-            console.log(`Telerising process exited with code ${code}`);
+            console.log(`${PREF}Telerising process exited with code ${code}`);
             telerisingProcess = null;
         });
 
         const settings = readSettings();
         const firstProvider = settings?.accounts ? Object.keys(settings.accounts)[0] : null;
-        console.log("Telerising started by " + user.name + " on port " + telerisingPort);
+        console.log(`${PREF}Telerising started by ` + user.name + " on port " + telerisingPort);
         res.json({ success: true, message: "Telerising started.", port: telerisingPort, pid: telerisingProcess.pid, channelsM3U: firstProvider ? `/telerising/live/${firstProvider}/channels.m3u` : null });
     });
 
@@ -267,7 +269,7 @@ export function telerisingRoutes(app, getDb, serverPort) {
         telerisingProcess.kill("SIGTERM");
         telerisingProcess = null;
 
-        console.log("Telerising stopped by " + user.name)
+        console.log(`${PREF}Telerising stopped by ` + user.name);
         res.json({ success: true, message: "Telerising stopped." });
     });
 
@@ -285,7 +287,7 @@ export function telerisingRoutes(app, getDb, serverPort) {
             upstream.on("data", (chunk) => body += chunk);
             upstream.on("end", () => {
                 if (isTelerisingUnavailable(body)) {
-                    console.log(`[Telerising] Recordings M3U session expired for '${provider}' — refreshing...`);
+                    console.log(`${PREF}Recordings M3U session expired for '${provider}' — refreshing...`);
                     refreshSession(provider);
                 }
 
@@ -321,7 +323,7 @@ export function telerisingRoutes(app, getDb, serverPort) {
             upstream.on("data", (chunk) => body += chunk);
             upstream.on("end", () => {
                 if (isTelerisingUnavailable(body)) {
-                    console.log(`[Telerising] M3U session expired for '${provider}' — refreshing...`);
+                    console.log(`${PREF}M3U session expired for '${provider}' — refreshing...`);
                     refreshSession(provider);
                 }
 
@@ -360,7 +362,7 @@ export function telerisingRoutes(app, getDb, serverPort) {
                 upstream.on("data", (chunk) => body += chunk);
                 upstream.on("end", () => {
                     if (isTelerisingUnavailable(body)) {
-                        console.log(`[Telerising] Channel stream session expired for '${provider}' — refreshing...`);
+                        console.log(`${PREF}Channel stream session expired for '${provider}' — refreshing...`);
                         refreshSession(provider);
                     }
 
@@ -406,16 +408,16 @@ export function startTelerisingIfAutostart(db) {
         if (line.includes("Running on") || line.includes("Listening") || line.includes(" *")) {
         }
     });
-    console.log("Telerising automaticly started on port " + telerisingPort);
-    if (firstProvider) console.log("Telerising M3U: /telerising/live/" + firstProvider + "/channels.m3u");
+    console.log(`${PREF}Telerising automaticly started on port ` + telerisingPort);
+    if (firstProvider) console.log(`${PREF}Telerising M3U: /telerising/live/` + firstProvider + "/channels.m3u");
 
     telerisingProcess.on("error", (err) => {
-        console.error("Telerising autostart error:", err.message);
+        console.error(`${PREF}Telerising autostart error:`, err.message);
         telerisingProcess = null;
     });
 
     telerisingProcess.on("exit", (code) => {
-        console.log("Telerising process exited with code " + code);
+        console.log(`${PREF}Telerising process exited with code ` + code);
         telerisingProcess = null;
     });
 }
@@ -439,7 +441,7 @@ function telerisingLogin() {
                 const cookies = res.headers["set-cookie"];
                 if (cookies) telerisingCookies = cookies.join("; ");
                 const ok = body.includes('"success": true');
-                console.log(`[Telerising] Login ${ok ? "succeeded" : "failed"}`);
+                console.log(`${PREF}Login ${ok ? "succeeded" : "failed"}`);
                 resolve(ok);
             });
         });
@@ -464,9 +466,9 @@ export async function refreshSession(provider) {
         res.on("data", (c) => body += c);
         res.on("end", () => {
             if (body.includes('"success": true')) {
-                console.log(`[Telerising] Session refresh for '${provider}' succeeded`);
+                console.log(`${PREF}Session refresh for '${provider}' succeeded`);
             } else if (body.includes("Invalid Session ID")) {
-                console.log(`[Telerising] Session expired, re-logging in...`);
+                console.log(`${PREF}Session expired, re-logging in...`);
                 telerisingCookies = "";
                 telerisingLogin().then(() => {
                     const retry = http.request({

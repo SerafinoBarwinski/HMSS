@@ -24,7 +24,7 @@ let db = null;
 export async function init(config) {
     try {
         db = new Database(DB_PATH, { readonly: true });
-        console.log(`Crunchyroll addon: loaded ${db.prepare("SELECT COUNT(*) as n FROM series").get().n} series`);
+        if (config?.verbose) console.log(`Crunchyroll addon: loaded ${db.prepare("SELECT COUNT(*) as n FROM series").get().n} series`);
     } catch (e) {
         console.warn(`Crunchyroll addon: failed to open DB — ${e.message}`);
     }

@@ -20,17 +20,17 @@ export function startDiscovery(port, httpPort) {
             });
 
             socket.send(response, rinfo.port, rinfo.address);
-            console.log(`Discovery response sent to ${rinfo.address}:${rinfo.port}`);
+            console.log(`[Discovery] response sent to ${rinfo.address}:${rinfo.port}`);
         }
     });
 
     socket.on("listening", () => {
         socket.setBroadcast(true);
-        console.log(`Discovery listening on UDP ${port}`);
+        console.log(`[Discovery] listening on UDP ${port}`);
     });
 
     socket.on("error", (err) => {
-        console.warn(`Discovery socket error: ${err.message}`);
+        console.warn(`[Discovery] socket error: ${err.message}`);
     });
 
     socket.bind(port);

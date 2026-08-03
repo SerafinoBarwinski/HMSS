@@ -1,1 +1,7 @@
-{}
+{
+    "verbose": {
+        "type": "boolean",
+        "label": "Verbose Logging",
+        "default": false
+    }
+}

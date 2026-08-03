@@ -22,6 +22,31 @@ import { startDiscovery } from "./src/backend/discovery.js"
 import { WebSocketServer } from "ws";
 
 process.stdout.write("\x1b]0;HMSS Server\x07");
+const colors = {
+    reset: "\x1b[0m",
+    yellow: "\x1b[33m",
+    red: "\x1b[31m"
+};
+
+function colorize(method, color) {
+    const original = console[method];
+
+    console[method] = (...args) => {
+        original("\t" + color, ...args, colors.reset);
+    };
+}
+
+colorize("warn", colors.yellow);
+colorize("error", colors.red);
+
+process.on("uncaughtException", (err) => {
+    console.error(err);
+    process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+    console.error(reason);
+});
 enableConsoleFileLogger("./logs/server.log")
 console.log("=".repeat(50))
 console.log("The server is starting up...");
@@ -42,8 +67,10 @@ var DEBUG_LOG_EVERY_REQUEST = false
 var DEBUG_LOG_EVERY_WEBSCKT = false;
 var DEBUG_fail_integrity_check = false;
 var DEBUG_skip_integrity_check = false;
-var DEBUG_TEA_POT = false;
 var DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = false;
+var DEBUG_CRASH_ON_STARTUP = false;
+
+var DEBUG_TEA_POT = false;
 
 var is_server_ready = false;
 var ServerUptime = 0;
@@ -91,6 +118,9 @@ for (const arg of args) {
         case "--i-am-a-tea-pot":
             console.error("☕️ I'm a teapot! (418)");
             DEBUG_TEA_POT = true;
+            break;
+        case "--crash-on-startup":
+            DEBUG_CRASH_ON_STARTUP = true;
             break;
         default:
             if (arg.startsWith("--migrate=")) {
@@ -143,11 +173,11 @@ const addonConfig = {};
 export const addons = await addonLoader.loadAddons(addonConfig, db, mediaDirs);
 
 export async function StartMediaIndex() {
-    console.log("The indexer has started. This may take a while...")
+    console.log("[INDEXER] Starting index build. This may take a while...")
     const index = await buildIndex(mediaDirs);
-    console.log(`Indexed: ${index.shows.length} show episodes, ${index.movies.length} movies, ${index.music.length} tracks, ${index.unsorted.length} unsorted`);
-    if (index.errors.length > 0) console.warn(`Index errors: ${index.errors.length}`);
-    if (index.unsorted.length > 0) console.log(`Unsorted files (needs organize): ${index.unsorted.length}`);
+    console.log(`[INDEXER] ${index.shows.length} show episodes, ${index.movies.length} movies, ${index.music.length} tracks, ${index.unsorted.length} unsorted`);
+    if (index.errors.length > 0) console.warn(`[INDEXER] Index errors: ${index.errors.length}`);
+    if (index.unsorted.length > 0) console.log(`[INDEXER] Unsorted files (needs organize): ${index.unsorted.length}`);
 
     // write meta.yaml + download posters for already-organized content
     let orgResult;
@@ -155,8 +185,8 @@ export async function StartMediaIndex() {
     if (index.movies.length > 0) orgResult = await organizeMovies(index.movies, { enrich: true, artwork: true });
     if (index.music.length > 0) orgResult = await organizeMusic(index.music);
 
-    if (orgResult) console.log(`Organized: ${orgResult.length} metadata writes`);
-    console.log("Indexer done")
+    if (orgResult) console.log(`[INDEXER] Organized: ${orgResult.length} metadata writes`);
+    console.log(`[INDEXER] Done`);
     return index;
 }
 
@@ -255,7 +285,7 @@ app.use("/web", (req, res, next) => {
 app.use("/web", express.static("web"));
 
 const server = app.listen(port, "0.0.0.0", async () => {
-    console.log(`HMSS listening on port ${port}`);
+    console.log(`[HMSS] listening on port ${port}`);
 
     startTelerisingIfAutostart(db);
 
@@ -267,7 +297,11 @@ const server = app.listen(port, "0.0.0.0", async () => {
     }
 
     is_server_ready = true;
-    console.log("Server is Ready!")
+    if (DEBUG_CRASH_ON_STARTUP) {
+        console.error("[HMSS] DEBUG_CRASH_ON_STARTUP is enabled. Crashing now.");
+        process.exit(1);
+    }
+    console.log("[HMSS] Server is Ready!")
 });
 
 const wss = new WebSocketServer({ server, path: "/socket" });

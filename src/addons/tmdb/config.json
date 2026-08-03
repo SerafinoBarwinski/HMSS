@@ -10,5 +10,10 @@
     "label": "Language",
     "default": "en",
     "options": ["de", "en", "fr", "es"]
+  },
+  "verbose": {
+    "type": "boolean",
+    "label": "Verbose Logging",
+    "default": false
   }
 }
