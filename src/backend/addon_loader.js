@@ -116,7 +116,7 @@ export async function loadAddons(userConfig = {}, db = null, mediaDirs = {}) {
         }
 
         try {
-            if (module.init) await module.init(config);
+            if (module.init) await module.init(config, { getAddons, getAddonById });
         } catch (e) {
             console.warn(`Addon '${entry.name}': init failed — ${e.message}`);
         }
@@ -172,6 +172,10 @@ function resolveConfig(id, schema, override, userConfig) {
 
 export function getAddons() {
     return addons;
+}
+
+export function getAddonById(id) {
+    return addons.find(a => a.id === id) || null;
 }
 
 export function getAllAddons() {

@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fanart.tv Viewer</title>
+
+<style>
+body{
+    margin:20px;
+    background:#181818;
+    color:#fff;
+    font-family:Arial,sans-serif;
+}
+
+h2,h3{
+    margin-top:24px;
+}
+
+input,select,button{
+    padding:8px;
+    margin:5px;
+    font-size:14px;
+}
+
+input{
+    width:500px;
+    max-width:95%;
+}
+
+button{
+    cursor:pointer;
+}
+
+.result{
+    background:#2b2b2b;
+    padding:12px;
+    margin:8px 0;
+    border-radius:6px;
+    cursor:pointer;
+}
+
+.result:hover{
+    background:#3b3b3b;
+}
+
+.grid{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+}
+
+.grid img{
+    width:250px;
+    border-radius:6px;
+    transition:.15s;
+}
+
+.grid img:hover{
+    transform:scale(1.03);
+}
+
+.info{
+    color:#aaa;
+    margin:10px 0;
+}
+
+.section{
+    margin-top:30px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>fanart.tv Viewer</h2>
+
+<div>
+    <input id="tmdbToken" placeholder="TMDB Bearer Token">
+</div>
+
+<div>
+    <input id="fanartKey" placeholder="fanart.tv API Key">
+</div>
+
+<div>
+    <select id="type">
+        <option value="movie">Film</option>
+        <option value="tv">Serie</option>
+    </select>
+
+    <input id="query" placeholder="Titel">
+
+    <button id="searchBtn">Suchen</button>
+</div>
+
+<div id="status" class="info"></div>
+
+<div id="results"></div>
+
+<div id="images"></div>
+
+<script>
+
+document.getElementById("searchBtn").addEventListener("click", search);
+
+document.getElementById("query").addEventListener("keydown", e=>{
+    if(e.key==="Enter") search();
+});
+
+async function search(){
+
+    const token=document.getElementById("tmdbToken").value.trim();
+    const query=document.getElementById("query").value.trim();
+    const type=document.getElementById("type").value;
+
+    if(!token || !query){
+        alert("Bitte TMDB Token und Titel eingeben.");
+        return;
+    }
+
+    document.getElementById("status").textContent="Suche bei TMDB...";
+    document.getElementById("results").innerHTML="";
+    document.getElementById("images").innerHTML="";
+
+    const endpoint=type==="movie"
+        ? "https://api.themoviedb.org/3/search/movie"
+        : "https://api.themoviedb.org/3/search/tv";
+
+    try{
+
+        const response=await fetch(
+            endpoint+"?query="+encodeURIComponent(query)+"&language=de-DE",
+            {
+                headers:{
+                    Authorization:"Bearer "+token,
+                    accept:"application/json"
+                }
+            }
+        );
+
+        const data=await response.json();
+
+        if(!data.results || data.results.length===0){
+            document.getElementById("status").textContent="Keine Treffer.";
+            return;
+        }
+
+        document.getElementById("status").textContent=`${data.results.length} Treffer gefunden.`;
+
+        for(const item of data.results){
+
+            const div=document.createElement("div");
+            div.className="result";
+
+            div.innerHTML=`
+                <strong>${item.title || item.name}</strong><br>
+                TMDB ID: ${item.id}<br>
+                ${item.release_date || item.first_air_date || ""}
+            `;
+
+            div.onclick=()=>loadFanart(item.id,type);
+
+            document.getElementById("results").appendChild(div);
+
+        }
+
+    }catch(err){
+        console.error(err);
+        document.getElementById("status").textContent="TMDB Fehler.";
+    }
+
+}
+
+async function loadFanart(tmdbId,type){
+
+    const token=document.getElementById("tmdbToken").value.trim();
+    const apiKey=document.getElementById("fanartKey").value.trim();
+
+    document.getElementById("images").innerHTML="";
+    document.getElementById("status").textContent="Lade fanart.tv...";
+
+    let fanartUrl;
+
+    try{
+
+        if(type==="movie"){
+
+            fanartUrl=`https://webservice.fanart.tv/v3.2/movies/${tmdbId}?api_key=${apiKey}`;
+
+        }else{
+
+            document.getElementById("status").textContent="Hole TVDB-ID von TMDB...";
+
+            const external=await fetch(
+                `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids`,
+                {
+                    headers:{
+                        Authorization:"Bearer "+token,
+                        accept:"application/json"
+                    }
+                }
+            );
+
+            const externalData=await external.json();
+
+            console.log("External IDs:",externalData);
+
+            if(!externalData.tvdb_id){
+                document.getElementById("status").textContent="Keine TVDB-ID gefunden.";
+                return;
+            }
+
+            fanartUrl=`https://webservice.fanart.tv/v3.2/tv/${externalData.tvdb_id}?api_key=${apiKey}`;
+
+        }
+
+        console.log("fanart URL:",fanartUrl);
+
+        const response=await fetch(fanartUrl);
+
+        if(!response.ok){
+            document.getElementById("status").textContent="fanart.tv hat keine Daten gefunden.";
+            return;
+        }
+
+        const data=await response.json();
+
+        console.log(data);
+
+        document.getElementById("status").textContent="Bilder geladen.";
+
+        let found=false;
+
+        for(const key in data){
+
+            if(!Array.isArray(data[key])) continue;
+
+            found=true;
+
+            const section=document.createElement("div");
+            section.className="section";
+
+            section.innerHTML=`<h3>${key}</h3>`;
+
+            const grid=document.createElement("div");
+            grid.className="grid";
+
+            for(const image of data[key]){
+
+                const link=document.createElement("a");
+                link.href=image.url;
+                link.target="_blank";
+
+                const img=document.createElement("img");
+                img.src=image.url;
+                img.loading="lazy";
+
+                link.appendChild(img);
+                grid.appendChild(link);
+
+            }
+
+            section.appendChild(grid);
+            document.getElementById("images").appendChild(section);
+
+        }
+
+        if(!found){
+            document.getElementById("status").textContent="Keine Bilder vorhanden.";
+        }
+
+    }catch(err){
+
+        console.error(err);
+        document.getElementById("status").textContent="Fehler beim Laden.";
+
+    }
+
+}
+</script>
+
+</body>
+</html>

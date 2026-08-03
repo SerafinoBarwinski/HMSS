@@ -1,18 +1,20 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
-const BASE = "https://webservice.fanart.tv/v3";
+const BASE = "https://webservice.fanart.tv/v3.2";
 
 let apiKey = "";
 let keyType = "personal";
 let posterSize = "medium";
 let backgroundSize = "large";
+let getAddonById = null;
 
-export async function init(config) {
+export async function init(config, helpers) {
     apiKey = config.api_key || "";
     keyType = config.key_type || "personal";
     posterSize = config.poster_size || "medium";
     backgroundSize = config.background_size || "large";
+    if (helpers && typeof helpers.getAddonById === "function") getAddonById = helpers.getAddonById;
 }
 
 function authHeaders() {
@@ -21,12 +23,27 @@ function authHeaders() {
         : { "client-key": apiKey };
 }
 
+// fanart.tv keys TV artwork by TVDB id, not TMDB id. Resolve the TVDB id via
+// the tmdb addon (external_ids) so shows actually return artwork.
+async function resolveFanartId(tmdbId, type) {
+    if (type !== "show" && type !== "series") return tmdbId;
+    const tmdb = getAddonById ? getAddonById("tmdb") : null;
+    if (tmdb && tmdb.module && typeof tmdb.module.getExternalIds === "function") {
+        try {
+            const ext = await tmdb.module.getExternalIds(tmdbId, type);
+            if (ext && ext.tvdb_id) return ext.tvdb_id;
+        } catch (e) { }
+    }
+    return tmdbId;
+}
+
 export async function fetchArtwork({ tmdbId, type }) {
     if (!apiKey) throw new Error("Fanart.tv API key not configured");
     if (!tmdbId) throw new Error("tmdbId required");
 
     const category = type === "show" || type === "series" ? "tv" : "movies";
-    const url = `${BASE}/${category}/${tmdbId}`;
+    const id = await resolveFanartId(tmdbId, type);
+    const url = `${BASE}/${category}/${id}`;
 
     const resp = await fetch(url, { headers: authHeaders() });
     if (!resp.ok) {

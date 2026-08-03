@@ -575,10 +575,16 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const rawId = (req.params.itemId || "").replace(/-/g, "");
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
         const meta = findItemMetaById(rawId, index);
-        if (!meta?.tmdbId) return res.json({ Images: [], TotalRecordCount: 0, Providers: ["TheMovieDb", "Fanart"] });
+        if (!meta?.tmdbId) {
+            console.error(`[RemoteImages] No tmdbId for item ${req.params.itemId} (imageType=${imageType}) - cannot query remote image providers. Missing metadata enrichment (meta.yaml tmdb_id)?`);
+            return res.json({ Images: [], TotalRecordCount: 0, Providers: ["TheMovieDb", "Fanart"] });
+        }
 
         const images = [];
         const providers = getAddonsByCapability("artwork");
+        if (providers.length === 0) {
+            console.error(`[RemoteImages] No artwork provider addon is loaded - requested remote images for item ${req.params.itemId} cannot be served.`);
+        }
         if (providers.length > 0) {
             try {
                 const art = providers[0].module;
@@ -633,7 +639,12 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                         }
                     }
                 }
-            } catch { }
+            } catch (e) {
+                console.error(`[RemoteImages] Artwork fetch failed for item ${req.params.itemId} (tmdbId=${meta?.tmdbId}): ${e?.message || e}`);
+                if (e && typeof e.message === "string" && /api key|not configured|key/i.test(e.message)) {
+                    console.error("[RemoteImages] No API key configured for the artwork provider - remote images are unavailable until a key is set (addon settings or override.json).");
+                }
+            }
         }
 
         const filtered = images.filter(i => i.Type === imageType);
@@ -836,7 +847,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         res.json({ ...addon.config, ...stored });
     });
 
-    app.post("/Plugins/:pluginId/Configuration", (req, res) => {
+    app.post("/Plugins/:pluginId/Configuration", async (req, res) => {
         if (!req.user || req.user.perms < 2) return res.status(401).json({ error: "Unauthorized" });
         const addons = getAddons();
         const addon = addons.find(a => a.id === req.params.pluginId || a.name === req.params.pluginId);
@@ -848,6 +859,20 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         try { parsed = JSON.parse(stored?.config_json || "{}"); } catch { }
         Object.assign(parsed, req.body || {});
         setAddonConfig(db, addon.id, parsed);
+
+        // Re-apply the config to the addon module immediately, so keys entered via
+        // the web UI take effect without a server restart.
+        if (addon.module && typeof addon.module.init === "function") {
+            try {
+                const liveConfig = { ...addon.config, ...parsed };
+                await addon.module.init(liveConfig);
+                addon.config = liveConfig;
+                console.log(`[Addon] '${addon.id}': config updated and re-applied to the module.`);
+            } catch (e) {
+                console.error(`[Addon] '${addon.id}': re-applying config failed - ${e.message}`);
+            }
+        }
+
         res.json({ Configuration: { ...parsed } });
     });
 
