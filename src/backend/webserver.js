@@ -13,7 +13,7 @@ import * as codecs from "./codecs.js";
 import * as transcoder from "./transcoder.js";
 import * as server from "../../server.js";
 
-import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream, globSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
@@ -277,9 +277,41 @@ function _decompressBuffer(buf, depth) {
 }
 
 async function _fetchFeed(url) {
-    var resp = await fetch(url);
-    if (!resp.ok) return null;
-    var buf = Buffer.from(await resp.arrayBuffer());
+    var buf;
+    if (/^(https?|ftp):\/\//i.test(url)) {
+        var resp = await fetch(url);
+        if (!resp.ok) return null;
+        buf = Buffer.from(await resp.arrayBuffer());
+    } else {
+        // Local file path (absolute, ~-expanded or file:// URL); supports globs (* ? [])
+        var filePath = url;
+        if (filePath.startsWith("file://")) filePath = filePath.slice("file://".length);
+        if (filePath.startsWith("~")) filePath = filePath.startsWith("~/") ? path.join(os.homedir(), filePath.slice(2)) : path.join(os.homedir(), filePath.slice(1));
+        if (/[*?[\]]/.test(filePath)) {
+            try {
+                var matches = globSync(filePath, { nodir: true });
+                // Lenient fallback: anchor a trailing filter loosely (xml* -> *xml*)
+                if (!matches.length) {
+                    var lastSlash = filePath.lastIndexOf("/");
+                    var dir = lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "";
+                    var lastSeg = lastSlash >= 0 ? filePath.slice(lastSlash + 1) : filePath;
+                    if (lastSeg && !/^[*?[\]]/.test(lastSeg)) {
+                        matches = globSync(dir + "*" + lastSeg, { nodir: true });
+                    }
+                }
+                if (!matches.length) return null;
+                matches.sort(function (a, b) { return statSync(b).mtimeMs - statSync(a).mtimeMs; });
+                filePath = matches[0];
+            } catch (e) {
+                return null;
+            }
+        }
+        try {
+            buf = readFileSync(filePath);
+        } catch (e) {
+            return null;
+        }
+    }
     if (!buf.length) return null;
     var decompressed = _decompressBuffer(buf, 0);
     if (!decompressed || !decompressed.length) return null;
