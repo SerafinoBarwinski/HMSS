@@ -1,11 +1,13 @@
-import { getAddons, getAllAddons, getAddonsByCapability, searchAll, getWebRegistry, getAddonWebFiles, getAddonDir, registerAddonBackendRoutes } from "./addon_loader.js";
-import { authMiddleware, hmssAuthRoutes } from "./auth.js";
-import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems, getAddonRow, getAllAddonRows, setAddonConfig, setAddonEnabled } from "./sql.js";
+import { getAddons, getAllAddons, getAddonsByCapability, searchAll, getWebRegistry, getAddonWebFiles, getAddonDir, registerAddonBackendRoutes, getAddonLibraries, resolveAddonLibraryFile } from "./addon_loader.js";
+import { authMiddleware, hmssAuthRoutes, hashLogoPath, resolveUser } from "./auth.js";
+import * as sql from "./sql.js";
+import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems, getAddonRow, getAllAddonRows, setAddonConfig, setAddonEnabled, getUserById, getUserByName, getUserCount, addUser, removeUser, editUser, getUserPolicy, setUserPolicy, getUserConfiguration, setUserConfiguration, getUserImage } from "./sql.js";
 import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
+import { ADDON_COLLECTION_TYPE, browseAddonLibrary, collectionIdFor, getAddonCollections, getAddonLibraryItem, isAddonLibraryId, makeCollectionItem, resolveLibraryImage } from "./addon_library.js";
 import { getItemMeta } from "./meta_reader.js";
 import { renderSplashscreen } from "./splashscreen.js";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import * as telerising from "./telerising.js";
 import * as codecs from "./codecs.js";
 import * as transcoder from "./transcoder.js";
@@ -28,162 +30,162 @@ let AudioStreamingIndexCach = [{}]
 // { userID: [{movieID:AudioStreamingIndex}] }
 
 let _liveTvCache = { channels: [], ts: 0 };
-    function getLiveTvConfig(db) {
-        const sys = getSystemInfo(db);
-        let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
-        return stored.livetv || {
-            EnableRecordingSubfolders: false,
-            EnableOriginalAudioWithEncodedRecordings: false,
-            TunerHosts: [],
-            ListingProviders: [],
-            PrePaddingSeconds: 0,
-            PostPaddingSeconds: 0,
-            MediaLocationsCreated: [],
-            RecordingPostProcessorArguments: "",
-            SaveRecordingNFO: true,
-            SaveRecordingImages: true,
-            ChannelMappings: [],
-        };
-    }
+function getLiveTvConfig(db) {
+    const sys = getSystemInfo(db);
+    let stored = {};
+    try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+    return stored.livetv || {
+        EnableRecordingSubfolders: false,
+        EnableOriginalAudioWithEncodedRecordings: false,
+        TunerHosts: [],
+        ListingProviders: [],
+        PrePaddingSeconds: 0,
+        PostPaddingSeconds: 0,
+        MediaLocationsCreated: [],
+        RecordingPostProcessorArguments: "",
+        SaveRecordingNFO: true,
+        SaveRecordingImages: true,
+        ChannelMappings: [],
+    };
+}
 
-    function setLiveTvConfig(db, config) {
-        const sys = getSystemInfo(db);
-        let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
-        stored.livetv = config;
-        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
-    }
+function setLiveTvConfig(db, config) {
+    const sys = getSystemInfo(db);
+    let stored = {};
+    try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+    stored.livetv = config;
+    db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
+}
 
-    const DEFAULT_BRANDING_CSS = '@import url("https://cdn.jsdelivr.net/gh/lscambo13/ElegantFin@main/Theme/ElegantFin-jellyfin-theme-build-latest-minified.css");';
-    const DEFAULT_LOGIN_DISCLAIMER = "Private Media Server\n\nThis server is intended for private use by authorized users only.\n\t• Connection information, including your IP address, may be logged for security purposes.\n\t• Logs are only used to investigate abuse, unauthorized access, or attacks.\n\t• As this is a private service and not intended for public use, public legal notices or privacy information may not be provided.\n\nIf you are not authorized to access this server, please disconnect.";
+const DEFAULT_BRANDING_CSS = '@import url("https://cdn.jsdelivr.net/gh/lscambo13/ElegantFin@main/Theme/ElegantFin-jellyfin-theme-build-latest-minified.css");';
+const DEFAULT_LOGIN_DISCLAIMER = "Private Media Server\n\nThis server is intended for private use by authorized users only.\n\t• Connection information, including your IP address, may be logged for security purposes.\n\t• Logs are only used to investigate abuse, unauthorized access, or attacks.\n\t• As this is a private service and not intended for public use, public legal notices or privacy information may not be provided.\n\nIf you are not authorized to access this server, please disconnect.";
 
-    function getBrandingConfig(db) {
-        const sys = getSystemInfo(db);
-        let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
-        return {
-            SplashscreenEnabled: false,
-            LoginDisclaimer: DEFAULT_LOGIN_DISCLAIMER,
-            CustomCss: DEFAULT_BRANDING_CSS,
-            ...(stored.branding || {}),
-        };
-    }
+function getBrandingConfig(db) {
+    const sys = getSystemInfo(db);
+    let stored = {};
+    try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+    return {
+        SplashscreenEnabled: false,
+        LoginDisclaimer: DEFAULT_LOGIN_DISCLAIMER,
+        CustomCss: DEFAULT_BRANDING_CSS,
+        ...(stored.branding || {}),
+    };
+}
 
-    function setBrandingConfig(db, config) {
-        const sys = getSystemInfo(db);
-        let stored = {};
-        try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
-        stored.branding = config;
-        db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
-    }
+function setBrandingConfig(db, config) {
+    const sys = getSystemInfo(db);
+    let stored = {};
+    try { stored = JSON.parse(sys?.config_json || "{}"); } catch { }
+    stored.branding = config;
+    db.prepare("UPDATE system SET config_json = ?").run(JSON.stringify(stored));
+}
 
-    // --- LiveTV channel cache ---
-    async function getLiveTvChannels(db) {
-        if (Date.now() - _liveTvCache.ts < 30000 && _liveTvCache.channels.length > 0) return _liveTvCache.channels;
-        const config = getLiveTvConfig(db);
-        if (!config.TunerHosts || config.TunerHosts.length === 0) { _liveTvCache = { channels: [], ts: Date.now() }; return []; }
-        const serverId = getSystemInfo(db)?.id || "hmss-local";
-        const all = [];
-        for (const host of config.TunerHosts) {
-            if (!host.Url) continue;
-            try {
-                const m3u = await fetchM3U(host.Url);
-                const parsed = parseM3U(m3u);
-                for (const ch of parsed) {
-                    all.push({
-                        Name: ch.name,
-                        ServerId: serverId,
+// --- LiveTV channel cache ---
+async function getLiveTvChannels(db) {
+    if (Date.now() - _liveTvCache.ts < 30000 && _liveTvCache.channels.length > 0) return _liveTvCache.channels;
+    const config = getLiveTvConfig(db);
+    if (!config.TunerHosts || config.TunerHosts.length === 0) { _liveTvCache = { channels: [], ts: Date.now() }; return []; }
+    const serverId = getSystemInfo(db)?.id || "hmss-local";
+    const all = [];
+    for (const host of config.TunerHosts) {
+        if (!host.Url) continue;
+        try {
+            const m3u = await fetchM3U(host.Url);
+            const parsed = parseM3U(m3u);
+            for (const ch of parsed) {
+                all.push({
+                    Name: ch.name,
+                    ServerId: serverId,
+                    Id: ch.id,
+                    TvgId: ch.tvgId || "",
+                    SortName: ch.name.toLowerCase(),
+                    IsFolder: false,
+                    Type: "TvChannel",
+                    LocationType: "Remote",
+                    MediaType: "Video",
+                    MediaSources: [{
+                        Protocol: "Stream",
                         Id: ch.id,
-                        TvgId: ch.tvgId || "",
-                        SortName: ch.name.toLowerCase(),
-                        IsFolder: false,
-                        Type: "TvChannel",
-                        LocationType: "Remote",
-                        MediaType: "Video",
-                        MediaSources: [{
-                            Protocol: "Stream",
-                            Id: ch.id,
-                            Name: ch.name,
-                            Path: ch.url,
-                            Type: "Default",
-                            Container: "hls",
-                            IsRemote: true,
-                            SupportsDirectPlay: true,
-                            SupportsDirectStream: true,
-                            SupportsTranscoding: false,
-                        }],
-                        ImageTags: ch.logo ? { Primary: ch.id } : {},
-                        LogoUrl: ch.logo || "",
-                        Overview: "",
-                        ParentId: "",
-                        GenreItems: [],
-                        Genres: [ch.group],
-                        Tags: [],
-                        UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false },
-                    });
-                }
-            } catch { }
-        }
-        _liveTvCache = { channels: all, ts: Date.now() };
-        return all;
-    }
-
-    function fetchM3U(url) {
-        return new Promise((resolve, reject) => {
-            http.get(url, { timeout: 10000 }, (res) => {
-                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                    return fetchM3U(res.headers.location).then(resolve, reject);
-                }
-                let body = "";
-                res.on("data", (c) => body += c);
-                res.on("end", () => {
-                    if (telerising.isTelerisingUnavailable(body)) {
-                        const m = url.match(/\/api\/([^/]+)\//);
-                        if (m) {
-                            console.log(`[Telerising] fetchM3U session expired for '${m[1]}' — refreshing...`);
-                            telerising.refreshSession(m[1]);
-                        }
-                    }
-                    resolve(body);
+                        Name: ch.name,
+                        Path: ch.url,
+                        Type: "Default",
+                        Container: "hls",
+                        IsRemote: true,
+                        SupportsDirectPlay: true,
+                        SupportsDirectStream: true,
+                        SupportsTranscoding: false,
+                    }],
+                    ImageTags: ch.logo ? { Primary: ch.id } : {},
+                    LogoUrl: ch.logo || "",
+                    Overview: "",
+                    ParentId: "",
+                    GenreItems: [],
+                    Genres: [ch.group],
+                    Tags: [],
+                    UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false },
                 });
-            }).on("error", reject);
-        });
-    }
-
-    function parseM3U(content) {
-        const lines = content.split("\n").map(l => l.trim()).filter(Boolean);
-        const channels = [];
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].startsWith("#EXTINF:")) {
-                const inf = lines[i];
-                const url = lines[i + 1];
-                if (!url || url.startsWith("#")) continue;
-
-                const nameMatch = inf.match(/,\s*(.+)$/);
-                const name = nameMatch ? nameMatch[1].trim() : "Unknown";
-                const logoMatch = inf.match(/tvg-logo="([^"]+)"/);
-                const logo = logoMatch ? logoMatch[1] : "";
-                const groupMatch = inf.match(/group-title="([^"]+)"/);
-                const group = groupMatch ? groupMatch[1] : "General";
-                const idMatch = inf.match(/tvg-id="([^"]+)"/);
-                const tvgId = idMatch ? idMatch[1] : "";
-                const chnoMatch = inf.match(/tvg-chno="([^"]+)"/);
-                const chno = chnoMatch ? parseInt(chnoMatch[1]) : 0;
-
-                const id = generateItemId(name + url);
-                channels.push({ id, name, logo, group, tvgId, chno, url });
             }
-        }
-        return channels;
+        } catch { }
     }
+    _liveTvCache = { channels: all, ts: Date.now() };
+    return all;
+}
+
+function fetchM3U(url) {
+    return new Promise((resolve, reject) => {
+        http.get(url, { timeout: 10000 }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return fetchM3U(res.headers.location).then(resolve, reject);
+            }
+            let body = "";
+            res.on("data", (c) => body += c);
+            res.on("end", () => {
+                if (telerising.isTelerisingUnavailable(body)) {
+                    const m = url.match(/\/api\/([^/]+)\//);
+                    if (m) {
+                        console.log(`[Telerising] fetchM3U session expired for '${m[1]}' — refreshing...`);
+                        telerising.refreshSession(m[1]);
+                    }
+                }
+                resolve(body);
+            });
+        }).on("error", reject);
+    });
+}
+
+function parseM3U(content) {
+    const lines = content.split("\n").map(l => l.trim()).filter(Boolean);
+    const channels = [];
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith("#EXTINF:")) {
+            const inf = lines[i];
+            const url = lines[i + 1];
+            if (!url || url.startsWith("#")) continue;
+
+            const nameMatch = inf.match(/,\s*(.+)$/);
+            const name = nameMatch ? nameMatch[1].trim() : "Unknown";
+            const logoMatch = inf.match(/tvg-logo="([^"]+)"/);
+            const logo = logoMatch ? logoMatch[1] : "";
+            const groupMatch = inf.match(/group-title="([^"]+)"/);
+            const group = groupMatch ? groupMatch[1] : "General";
+            const idMatch = inf.match(/tvg-id="([^"]+)"/);
+            const tvgId = idMatch ? idMatch[1] : "";
+            const chnoMatch = inf.match(/tvg-chno="([^"]+)"/);
+            const chno = chnoMatch ? parseInt(chnoMatch[1]) : 0;
+
+            const id = generateItemId(name + url);
+            channels.push({ id, name, logo, group, tvgId, chno, url });
+        }
+    }
+    return channels;
+}
 
 let _epgCache = { programmes: [], ts: 0, providerId: "" };
 
 function _nextPk(buf, start) {
     for (var i = start; i < buf.length - 4; i++) {
-        if (buf[i] === 0x50 && buf[i+1] === 0x4b) {
-            var tag = buf[i+2] << 8 | buf[i+3];
+        if (buf[i] === 0x50 && buf[i + 1] === 0x4b) {
+            var tag = buf[i + 2] << 8 | buf[i + 3];
             if (tag === 0x0304 || tag === 0x0102 || tag === 0x0506) return i;
         }
     }
@@ -440,10 +442,10 @@ function proxyLiveTvLogo(res, logoUrl) {
         const ct = upstream.headers["content-type"];
         const mime = typeof ct === "string" && /^image\//i.test(ct) ? ct
             : /\.png(\?|$)/i.test(logoUrl) ? "image/png"
-            : /\.webp(\?|$)/i.test(logoUrl) ? "image/webp"
-            : /\.svg(\?|$)/i.test(logoUrl) ? "image/svg+xml"
-            : /\.(jpe?g)(\?|$)/i.test(logoUrl) ? "image/jpeg"
-            : "image/png";
+                : /\.webp(\?|$)/i.test(logoUrl) ? "image/webp"
+                    : /\.svg(\?|$)/i.test(logoUrl) ? "image/svg+xml"
+                        : /\.(jpe?g)(\?|$)/i.test(logoUrl) ? "image/jpeg"
+                            : "image/png";
         res.set("Content-Type", mime);
         upstream.pipe(res);
     }).on("error", () => res.status(404).end());
@@ -798,7 +800,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         if (!addon) return res.status(404).json({ error: "Plugin not found" });
         const row = getAddonRow(getDb(), addon.id);
         let stored = {};
-        try { stored = JSON.parse(row?.config_json || "{}"); } catch {}
+        try { stored = JSON.parse(row?.config_json || "{}"); } catch { }
         res.json({ ...addon.config, ...stored });
     });
 
@@ -811,7 +813,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const db = getDb();
         const stored = getAddonRow(db, addon.id);
         let parsed = {};
-        try { parsed = JSON.parse(stored?.config_json || "{}"); } catch {}
+        try { parsed = JSON.parse(stored?.config_json || "{}"); } catch { }
         Object.assign(parsed, req.body || {});
         setAddonConfig(db, addon.id, parsed);
         res.json({ Configuration: { ...parsed } });
@@ -887,6 +889,22 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 }
             }
             return res.status(404).end();
+        }
+
+        // addon library images (collection / folder / file items)
+        if (isAddonLibraryId(rawId)) {
+            const libImg = await resolveLibraryImage(rawId, imageType);
+            if (!libImg) return res.status(404).end();
+            try {
+                const s = statSync(libImg.path);
+                const ext = libImg.path.split(".").pop();
+                const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+                res.set("Content-Type", mime);
+                res.set("Content-Length", s.size);
+                return createReadStream(libImg.path).pipe(res);
+            } catch {
+                return res.status(404).end();
+            }
         }
 
         // LiveTV channel logo proxy
@@ -1021,6 +1039,13 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                     Folders: [getFolder(p)]
                 });
             }
+        }
+        for (const lib of getAddonCollections()) {
+            libraries.push({
+                Id: collectionIdFor(lib),
+                Name: lib.name.charAt(0).toUpperCase() + lib.name.slice(1),
+                Folders: [getFolder(lib.path)],
+            });
         }
 
         res.json({
@@ -1269,6 +1294,9 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 RefreshStatus: "Idle",
             });
         }
+        for (const lib of getAddonCollections()) {
+            result.push(makeCollectionItem(lib, getSystemInfo(getDb())?.id || "hmss-local"));
+        }
         res.json(result);
     });
 
@@ -1511,14 +1539,9 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
     app.get("/Startup/User", (req, res) => {
         const db = getDb();
-        const sys = getSystemInfo(db);
-        if (sys && sys.startup_wizard_completed) {
-            return res.status(204).end();
-        }
-        // wizard not complete — check if first user exists
-        const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
-        if (userCount > 0) return res.status(204).end();
-        // no users — let wizard create first user
+        // if a user already exists the wizard is done, otherwise let the wizard
+        // create the first (admin) user — independent of the stale wizard flag
+        if (sql.getUserCount(db) > 0) return res.status(204).end();
         res.status(200).json({});
     });
 
@@ -1532,15 +1555,10 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const { Name, Password } = req.body || {};
         if (!Name || !Password) return res.status(400).json({ error: "Name and Password required." });
 
-        const existingUser = db.prepare("SELECT id FROM users WHERE name = ?").get(Name);
-        if (existingUser) return res.status(400).json({ error: "User already exists." });
+        if (sql.getUserByName(db, Name)) return res.status(400).json({ error: "User already exists." });
 
-        const argon2 = (await import("argon2")).default;
-        const passwordHash = await argon2.hash(Password, { type: argon2.argon2id });
-        const uuid = crypto.randomUUID();
-
-        db.prepare("INSERT INTO users (name, password_hash, perms, uuid) VALUES (?, ?, ?, ?)")
-            .run(Name, passwordHash, 3, uuid);
+        const result = sql.addUser(Name, Password, true, db);
+        if (!result.success) return res.status(400).json({ error: result.reason });
 
         console.log(`First user '${Name}' created via startup wizard.`);
         res.status(204).end();
@@ -1619,85 +1637,25 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     app.get("/Users/Me", (req, res) => {
         if (!req.user) return res.status(401).json({ error: "Unauthorized." });
         const db = getDb();
-        const u = db.prepare("SELECT * FROM users WHERE id = ?").get(req.user.id);
+        const u = sql.getUserById(db, req.user.id);
         if (!u) return res.status(404).json({ error: "User not found." });
-        const p = u.perms;
-        const isAdmin = p >= 2;
-        const isRoot = p >= 3;
+        const policy = sql.getUserPolicy(db, u.Id);
+        const config = sql.getUserConfiguration(db, u.Id);
+        const logoPath = sql.getUserImage(db, u.Id)?.logo_path || null;
         res.json({
-            Name: u.name,
+            Name: u.Username,
             ServerId: "hmss-local",
             ServerName: "HMSS",
-            Id: String(u.id),
-            PrimaryImageTag: u.logo_path || null,
+            Id: u.Id.replace(/-/g, ""),
+            PrimaryImageTag: logoPath ? hashLogoPath(logoPath) : null,
             EnableAutoLogin: false,
-            LastLoginDate: new Date().toISOString(),
-            LastActivityDate: new Date().toISOString(),
-            HasPassword: true,
-            HasConfiguredPassword: true,
+            LastLoginDate: u.LastLoginDate || new Date().toISOString(),
+            LastActivityDate: u.LastActivityDate || new Date().toISOString(),
+            HasPassword: Boolean(u.Password),
+            HasConfiguredPassword: Boolean(u.Password),
             HasConfiguredEasyPassword: false,
-            Configuration: {
-                AudioLanguagePreference: "",
-                PlayDefaultAudioTrack: true,
-                SubtitleLanguagePreference: "",
-                DisplayMissingEpisodes: false,
-                GroupedFolders: [],
-                SubtitleMode: "Default",
-                DisplayCollectionsView: false,
-                EnableLocalPassword: true,
-                OrderedViews: [],
-                LatestItemsExcludes: [],
-                MyMediaExcludes: [],
-                HidePlayedInLatest: true,
-                RememberAudioSelections: true,
-                RememberSubtitleSelections: true,
-                EnableNextEpisodeAutoPlay: true,
-                CastReceiverId: null,
-            },
-            Policy: {
-                IsAdministrator: isAdmin,
-                IsHidden: isRoot,
-                EnableCollectionManagement: isAdmin,
-                EnableSubtitleManagement: isAdmin,
-                EnableLyricManagement: isAdmin,
-                IsDisabled: false,
-                MaxParentalRating: null,
-                BlockedTags: [],
-                EnableUserPreferenceAccess: true,
-                AccessSchedules: [],
-                BlockUnratedItems: [],
-                EnableRemoteControlOfOtherUsers: p >= 2,
-                EnableSharedDeviceControl: true,
-                EnableRemoteAccess: p >= 1,
-                EnableLiveTvManagement: isAdmin,
-                EnableLiveTvAccess: p >= 1,
-                EnableMediaPlayback: true,
-                EnableAudioPlaybackTranscoding: true,
-                EnableVideoPlaybackTranscoding: true,
-                EnablePlaybackRemuxing: true,
-                ForceRemoteSourceTranscoding: false,
-                EnableContentDeletion: p >= 2,
-                EnableContentDeletionFromFolders: [],
-                EnableContentDownloading: true,
-                EnableSyncTranscoding: true,
-                EnableMediaConversion: isAdmin,
-                EnabledDevices: [],
-                EnableAllDevices: true,
-                EnabledChannels: [],
-                EnableAllChannels: true,
-                EnabledFolders: [],
-                EnableAllFolders: true,
-                InvalidLoginAttemptCount: 0,
-                LoginAttemptsBeforeLockout: 0,
-                MaxActiveSessions: 0,
-                EnablePublicSharing: true,
-                BlockedMediaFolders: [],
-                BlockedChannels: [],
-                RemoteClientBitrateLimit: 0,
-                AuthenticationProviderId: "Emby.Server.Implementations.Library.DefaultAuthenticationProvider",
-                PasswordResetProviderId: "Emby.Server.Implementations.Library.DefaultPasswordResetProvider",
-                SyncPlayAccess: "CreateAndJoinGroups",
-            },
+            Configuration: config,
+            Policy: policy,
             PrimaryImageAspectRatio: 0,
         });
     });
@@ -1784,6 +1742,9 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         if (ltConfig?.TunerHosts?.length > 0) {
             items.push(makeUserView("Live TV", "livetv", LIB_IDS.livetv, "", null, null));
         }
+        for (const lib of getAddonCollections()) {
+            items.push(makeUserView(lib.name.charAt(0).toUpperCase() + lib.name.slice(1), ADDON_COLLECTION_TYPE, collectionIdFor(lib), lib.path, null, null));
+        }
         res.json({ Items: items, TotalRecordCount: items.length });
     });
 
@@ -1819,20 +1780,22 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
     app.get("/Sessions", (req, res) => {
         if (!req.user) return res.status(401).end();
         const db = getDb();
-        const sessions = db.prepare(`
-            SELECT sessions.token, sessions.created_at, users.id, users.uuid, users.name
-            FROM sessions JOIN users ON users.id = sessions.user_id
-            ORDER BY sessions.created_at DESC
+        const devices = db.prepare(`
+            SELECT Devices.AccessToken AS token, Devices.DateCreated, Devices.UserId AS user_id,
+                   Users.Username AS name, Devices.DeviceName AS device_name, Devices.DeviceId AS device_id,
+                   Devices.AppName AS app_name, Devices.AppVersion AS app_version
+            FROM Devices JOIN Users ON Users.Id = Devices.UserId
+            ORDER BY Devices.DateCreated DESC
         `).all();
 
         const now = Date.now();
         const controllableUserId = req.query.ControllableByUserId;
 
-        const activeSessions = sessions.filter(s => {
+        const activeSessions = devices.filter(s => {
             const lastKA = server.wsLastKeepAlive.get(s.token);
             if (!lastKA || now - lastKA > 20000) return false;
             if (controllableUserId) {
-                const sUuid = s.uuid || String(s.id);
+                const sUuid = s.user_id;
                 if (sUuid !== controllableUserId) return false;
             }
             return true;
@@ -1843,12 +1806,12 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
         res.json(activeSessions.map(s => ({
             Id: s.token,
-            UserId: s.uuid || String(s.id),
+            UserId: s.user_id,
             UserName: s.name,
-            Client: "HMSS",
-            DeviceName: "Web Browser",
-            DeviceId: "web",
-            ApplicationVersion: apiVersion,
+            Client: s.app_name || "HMSS",
+            DeviceName: s.device_name || "Web Browser",
+            DeviceId: s.device_id || "web",
+            ApplicationVersion: s.app_version || apiVersion,
             LastActivityDate: new Date().toISOString(),
             LastPlaybackCheckIn: "0001-01-01T00:00:00.0000000Z",
             IsActive: true,
@@ -1892,6 +1855,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const addonBrowse = await browseAddonLibrary(serverId, parentId);
+        if (addonBrowse) return res.json(addonBrowse);
         const result = filteredItemsFromIndex(index, serverId, {
             parentId,
             includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
@@ -1958,6 +1923,9 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                         break;
                     }
                 }
+                if (!item && isAddonLibraryId(rawId)) {
+                    item = await getAddonLibraryItem(serverId, rawId);
+                }
                 if (item) items.push(item);
             }
             const filters = (req.query.Filters || "").split(",");
@@ -1968,6 +1936,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const sys = getSystemInfo(getDb());
         const serverId = sys?.id || "hmss-local";
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const addonBrowse = await browseAddonLibrary(serverId, parentId);
+        if (addonBrowse) return res.json(addonBrowse);
         const result = filteredItemsFromIndex(index, serverId, {
             parentId,
             includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
@@ -2053,7 +2023,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                         if (pId === rawId) { found = p; itemType = "Program"; break; }
                     }
                 }
-            } catch (_) {}
+            } catch (_) { }
         }
         if (found && itemType === "Program") {
             var p = found;
@@ -2129,8 +2099,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             const childCount = lib.CollectionType === "tvshows"
                 ? [...new Set((index.shows || []).map(s => s.showName))].length
                 : lib.CollectionType === "movies" ? (index.movies || []).length
-                : lib.CollectionType === "music" ? (index.music || []).length
-                : 0;
+                    : lib.CollectionType === "music" ? (index.music || []).length
+                        : 0;
             return res.json({
                 Name: lib.Name,
                 ServerId: serverId,
@@ -2173,7 +2143,11 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 LockData: false,
             });
         }
-        if (!found) return res.status(404).json({ error: "Item not found." });
+        if (!found) {
+            const addonItem = await getAddonLibraryItem(serverId, rawId);
+            if (addonItem) return res.json(addonItem);
+            return res.status(404).json({ error: "Item not found." });
+        }
 
         let probe = null;
         if (itemPath && (itemPath.endsWith(".mp4") || itemPath.endsWith(".mkv") || itemPath.endsWith(".m4a") || itemPath.endsWith(".mp3"))) {
@@ -2285,7 +2259,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
 }
 
-export async function addonRoutes(app, getDb) {
+export async function addonRoutes(app, getDb, mediaDirs = {}) {
     app.get("/api/addons", (req, res) => {
         const dbRows = {};
         for (const row of getAllAddonRows(getDb())) dbRows[row.id] = row;
@@ -2298,6 +2272,7 @@ export async function addonRoutes(app, getDb) {
                 description: a.description,
                 capabilities: a.capabilities,
                 dependency: a.dependency,
+                library: a.library || [],
                 configSchema: a.configSchema,
                 configured: Object.values(a.config || {}).some(v => v),
                 enabled: row ? Boolean(row.enabled) : a.enabled !== false,
@@ -2341,8 +2316,55 @@ export async function addonRoutes(app, getDb) {
         res.json(results);
     });
 
+    // --- "library" capability: browse & stream addon-declared media folders ---
+
+    app.get("/api/addons/library", (req, res) => {
+        if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+        res.json(getAddonLibraries());
+    });
+
+    app.get("/api/addons/library/:addonId/:name/list", async (req, res) => {
+        if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+        const lib = getAddonLibraries().find(l => l.addon === req.params.addonId && l.name === req.params.name);
+        if (!lib) return res.status(404).json({ error: "Library not found" });
+        const relPath = typeof req.query.path === "string" ? req.query.path.replace(/\\/g, "/").replace(/^\/+/, "") : "";
+        const abs = resolveAddonLibraryFile(req.params.addonId, req.params.name, relPath);
+        if (!abs) return res.status(404).json({ error: "Invalid path" });
+
+        let entries;
+        try {
+            entries = await readdir(abs, { withFileTypes: true });
+        } catch {
+            return res.status(404).json({ error: "Directory not found" });
+        }
+
+        const dirs = [];
+        const files = [];
+        for (const ent of entries) {
+            const childRel = (relPath ? relPath + "/" : "") + ent.name;
+            if (ent.isDirectory()) {
+                dirs.push({ name: ent.name, path: childRel });
+            } else if (ent.isFile()) {
+                let size = 0;
+                try { size = (await stat(path.join(abs, ent.name))).size; } catch { }
+                files.push({ name: ent.name, path: childRel, size });
+            }
+        }
+        dirs.sort((a, b) => a.name.localeCompare(b.name));
+        files.sort((a, b) => a.name.localeCompare(b.name));
+        res.json({ addon: lib.addon, library: lib.name, base: lib.base, path: relPath, dirs, files });
+    });
+
+    app.get("/api/addons/library/:addonId/:name/file", (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const relPath = typeof req.query.path === "string" ? req.query.path.replace(/\\/g, "/").replace(/^\/+/, "") : "";
+        const abs = resolveAddonLibraryFile(req.params.addonId, req.params.name, relPath);
+        if (!abs) return res.status(404).end();
+        res.sendFile(abs, err => { if (err) res.status(404).end(); });
+    });
+
     // let addons register their own backend routes (called after authMiddleware is mounted)
-    registerAddonBackendRoutes(app, getDb);
+    registerAddonBackendRoutes(app, getDb, mediaDirs);
 }
 
 export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {}) {
@@ -2453,8 +2475,22 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.get('/Auth/Keys', (req, res) => { /* GetKeys */ res.status(200).json({ message: 'Not implemented' }); });
     app.post('/Auth/Keys', (req, res) => { /* CreateKey */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Auth/Keys/:key', (req, res) => { /* RevokeKey */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Auth/PasswordResetProviders', (req, res) => { /* GetPasswordResetProviders */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Auth/Providers', (req, res) => { /* GetAuthProviders */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Auth/PasswordResetProviders', (req, res) => {
+        res.status(200).json([
+            {
+                "Name": "Default Password Reset Provider",
+                "Id": "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider"
+            }
+        ]);
+    });
+    app.get('/Auth/Providers', (req, res) => {
+        res.status(200).json([
+            {
+                "Name": "Default",
+                "Id": "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider"
+            }
+        ]);
+    });
 
     // === Backup ===
     app.get('/Backup', (req, res) => { /* ListBackups */ res.status(200).json({ message: 'Not implemented' }); });
@@ -2511,20 +2547,23 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.get('/Devices', (req, res) => {
         if (!req.user) return res.status(401).end();
         const db = getDb();
-        const sessions = db.prepare(`
-            SELECT sessions.token, sessions.created_at, users.id as user_id, users.uuid, users.name as user_name
-            FROM sessions JOIN users ON users.id = sessions.user_id
+        const rows = db.prepare(`
+            SELECT Devices.AccessToken AS token, Devices.DateCreated AS created_at,
+                   Users.Id AS user_id, Users.Username AS user_name,
+                   Devices.DeviceName AS device_name, Devices.AppName AS app_name,
+                   Devices.AppVersion AS app_version
+            FROM Devices JOIN Users ON Users.Id = Devices.UserId
         `).all();
 
-        const devices = sessions.map(s => ({
-            Name: "Web Browser",
+        const devices = rows.map(s => ({
+            Name: s.device_name || "Web Browser",
             CustomName: null,
             AccessToken: s.token,
             Id: s.token,
             LastUserName: s.user_name,
-            AppName: "HMSS",
-            AppVersion: apiVersion,
-            LastUserId: s.uuid || String(s.user_id),
+            AppName: s.app_name || "HMSS",
+            AppVersion: s.app_version || apiVersion,
+            LastUserId: s.user_id,
             DateLastActivity: s.created_at,
             Capabilities: { PlayableMediaTypes: ["Audio", "Video"], SupportedCommands: [], SupportsMediaControl: true, SupportsPersistentIdentifier: false },
             IconUrl: null,
@@ -2538,7 +2577,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         const id = req.query.Id;
         if (id) {
             const db = getDb();
-            db.prepare("DELETE FROM sessions WHERE token = ?").run(id);
+            db.prepare("DELETE FROM Devices WHERE AccessToken = ?").run(id);
         }
         res.status(204).end();
     });
@@ -2791,6 +2830,9 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
                 });
             }
         }
+        for (const lib of getAddonCollections()) {
+            items.push(makeCollectionItem(lib, getSystemInfo(getDb())?.id || "hmss-local"));
+        }
         res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
     app.post('/Library/Movies/Added', (req, res) => { /* PostAddedMovies */ res.status(200).json({ message: 'Not implemented' }); });
@@ -2969,10 +3011,10 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         var names = [];
         try {
             var countries = JSON.parse(readFileSync(new URL('./countries.json', import.meta.url), 'utf-8'));
-            countries.forEach(function(c) {
+            countries.forEach(function (c) {
                 if (c.DisplayName) names.push(c.DisplayName.toLowerCase());
             });
-        } catch (e) {}
+        } catch (e) { }
 
         //Fallback - sorry, but we cant do all the countries, so we will just add some common ones
         // German country names commonly used in channel names
@@ -3481,7 +3523,173 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     });
 
     // === Localization ===
-    app.get('/Localization/ParentalRatings', (req, res) => { /* GetParentalRatings */ res.status(200).json({ message: 'Not implemented' }); });
+    app.get('/Localization/ParentalRatings', (req, res) => { /* GetParentalRatings */ res.status(200).json([
+        {
+            "Name": "Unrated"
+        },
+        {
+            "Name": "0",
+            "Value": 0,
+            "RatingScore": {
+                "score": 0
+            }
+        },
+        {
+            "Name": "FSK 0",
+            "Value": 0,
+            "RatingScore": {
+                "score": 0
+            }
+        },
+        {
+            "Name": "FSK-0",
+            "Value": 0,
+            "RatingScore": {
+                "score": 0
+            }
+        },
+        {
+            "Name": "Educational",
+            "Value": 0,
+            "RatingScore": {
+                "score": 0
+            }
+        },
+        {
+            "Name": "Infoprogramm",
+            "Value": 0,
+            "RatingScore": {
+                "score": 0
+            }
+        },
+        {
+            "Name": "6",
+            "Value": 6,
+            "RatingScore": {
+                "score": 6
+            }
+        },
+        {
+            "Name": "FSK 6",
+            "Value": 6,
+            "RatingScore": {
+                "score": 6
+            }
+        },
+        {
+            "Name": "FSK-6",
+            "Value": 6,
+            "RatingScore": {
+                "score": 6
+            }
+        },
+        {
+            "Name": "10",
+            "Value": 10,
+            "RatingScore": {
+                "score": 10
+            }
+        },
+        {
+            "Name": "12",
+            "Value": 12,
+            "RatingScore": {
+                "score": 12
+            }
+        },
+        {
+            "Name": "FSK 12",
+            "Value": 12,
+            "RatingScore": {
+                "score": 12
+            }
+        },
+        {
+            "Name": "FSK-12",
+            "Value": 12,
+            "RatingScore": {
+                "score": 12
+            }
+        },
+        {
+            "Name": "13",
+            "Value": 13,
+            "RatingScore": {
+                "score": 13
+            }
+        },
+        {
+            "Name": "14",
+            "Value": 14,
+            "RatingScore": {
+                "score": 14
+            }
+        },
+        {
+            "Name": "16",
+            "Value": 16,
+            "RatingScore": {
+                "score": 16
+            }
+        },
+        {
+            "Name": "FSK 16",
+            "Value": 16,
+            "RatingScore": {
+                "score": 16
+            }
+        },
+        {
+            "Name": "FSK-16",
+            "Value": 16,
+            "RatingScore": {
+                "score": 16
+            }
+        },
+        {
+            "Name": "18",
+            "Value": 18,
+            "RatingScore": {
+                "score": 18
+            }
+        },
+        {
+            "Name": "FSK 18",
+            "Value": 18,
+            "RatingScore": {
+                "score": 18
+            }
+        },
+        {
+            "Name": "FSK-18",
+            "Value": 18,
+            "RatingScore": {
+                "score": 18
+            }
+        },
+        {
+            "Name": "21",
+            "Value": 21,
+            "RatingScore": {
+                "score": 21
+            }
+        },
+        {
+            "Name": "XXX",
+            "Value": 1000,
+            "RatingScore": {
+                "score": 1000
+            }
+        },
+        {
+            "Name": "Banned",
+            "Value": 1001,
+            "RatingScore": {
+                "score": 1001
+            }
+        }
+    ]);
+    });
 
     // === Lyric ===
     app.delete('/Audio/:itemId/Lyrics', (req, res) => { /* DeleteLyrics */ res.status(200).json({ message: 'Not implemented' }); });
@@ -3798,7 +4006,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     // === RemoteImage ===
     app.post('/Items/:itemId/RemoteImages/Download', (req, res) => { /* DownloadRemoteImage */ res.status(200).json({ message: 'Not implemented' }); });
 
-// === ScheduledTask ===
+    // === ScheduledTask ===
     globalThis.__scheduledTasks = globalThis.__scheduledTasks || [];
     function _taskState(task) {
         var running = globalThis.__scheduledTasks.find(function (t) { return t.id === task.id && t.running; });
@@ -4258,72 +4466,137 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         const { Name, Password } = req.body || {};
         if (!Name || !Password) return res.status(400).json({ error: "Name and Password required." });
 
-        const existingUser = db.prepare("SELECT id FROM users WHERE name = ?").get(Name);
-        if (existingUser) return res.status(400).json({ error: "User already exists." });
+        if (sql.getUserByName(db, Name)) return res.status(400).json({ error: "User already exists." });
 
-        const argon2 = (await import("argon2")).default;
-        const passwordHash = await argon2.hash(Password, { type: argon2.argon2id });
-        const uuid = crypto.randomUUID();
-        const id = db.prepare("INSERT INTO users (name, password_hash, perms, uuid) VALUES (?, ?, ?, ?)")
-            .run(Name, passwordHash, 0, uuid).lastInsertRowid;
+        const result = sql.addUser(Name, Password, false, db);
+        if (!result.success) return res.status(400).json({ error: result.reason });
+
+        const user = sql.getUserById(db, result.userId);
 
         res.json({
-            Name,
+            Name: user.Username,
             ServerId: getSystemInfo(db)?.id || "hmss-local",
-            Id: uuid.replace(/-/g, ""),
-            HasPassword: true,
-            HasConfiguredPassword: true,
+            Id: user.Id.replace(/-/g, ""),
+            HasPassword: Boolean(user.Password),
+            HasConfiguredPassword: Boolean(user.Password),
             HasConfiguredAutoLogin: false,
-            LastActivityDate: null,
-            LastLoginDate: null,
+            LastActivityDate: user.LastActivityDate,
+            LastLoginDate: user.LastLoginDate,
             PrimaryImageAspectRatio: null,
             Created: new Date().toISOString(),
-            Policy: {
-                IsAdministrator: false,
-                IsHidden: false,
-                IsDisabled: false,
-                MaxParentalRating: 0,
-                MaxParentalRatingSubItems: 0,
-                AuthenticationProviderId: "Jellyfin.Server.Implementations.Security.DefaultAuthenticationProvider",
-                PasswordResetProviderId: "Jellyfin.Server.Implementations.Security.DefaultPasswordResetProvider",
-                EnableUserPreferenceSync: false,
-                RemoteClientBitrateLimit: 0,
-                AuthenticationProvider: "Default",
-                PasswordResetProvider: "Default",
-            },
+            Policy: sql.getUserPolicy(db, user.Id),
             PrimaryImageTag: null,
         });
     });
-    app.post('/Users/Password', (req, res) => { /* UpdateUserPassword */ res.status(200).json({ message: 'Not implemented' }); });
+    app.post('/Users/Password', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const { NewPw, ResetPassword } = req.body || {};
+        const userId = req.body?.Id || req.user.id;
+        const target = resolveUser(db, userId);
+        if (!target) return res.status(404).json({ error: "User not found." });
+        const isSelf = target.Id === req.user.id;
+        if (!isSelf && req.user.perms < 2) return res.status(403).end();
+        if (ResetPassword) {
+            db.prepare("UPDATE Users SET Password = NULL WHERE Id = ?").run(target.Id);
+        } else if (NewPw) {
+            const result = sql.editUser(target.Id, { password: NewPw }, db);
+            if (!result.success) return res.status(400).json({ error: result.reason });
+        }
+        res.status(204).end();
+    });
+    function isLastAdmin(db, user) {
+        if (!sql.getUserPolicy(db, user.Id).IsAdministrator) return false;
+        const admins = sql.getAllUsers(db).filter(u => sql.getUserPolicy(db, u.Id).IsAdministrator);
+        return admins.length <= 1;
+    }
+
     app.delete('/Users/:userId', (req, res) => {
         if (!req.user) return res.status(401).end();
         if (req.user.perms < 2) return res.status(403).end();
         const db = getDb();
-        const userId = req.params.userId;
-        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
-        let user = db.prepare("SELECT id, name FROM users WHERE uuid = ?").get(userId);
-        if (!user) user = db.prepare("SELECT id, name FROM users WHERE uuid = ?").get(withDashes);
-        if (!user) user = db.prepare("SELECT id, name FROM users WHERE id = ?").get(userId);
+        const user = resolveUser(db, req.params.userId);
         if (!user) return res.status(404).json({ error: "User not found." });
-        if (user.name === "root") return res.status(400).json({ error: "Cannot delete root user." });
-        if (user.id === req.user.id) return res.status(400).json({ error: "Cannot delete yourself." });
-        db.prepare("DELETE FROM sessions WHERE user_id = ?").run(user.id);
-        db.prepare("DELETE FROM users WHERE id = ?").run(user.id);
-        console.log(`User '${user.name}' (${user.id}) deleted by '${req.user.name}'.`);
+        if (user.Username === "root") return res.status(400).json({ error: "Cannot delete root user." });
+        if (user.Id === req.user.id) return res.status(400).json({ error: "Cannot delete yourself." });
+        if (isLastAdmin(db, user)) {
+            return res.status(403).send("There must be at least one user in the system with administrative access.");
+        }
+        const result = sql.removeUser(user.Id, db);
+        if (!result.success) return res.status(400).json({ error: result.reason });
+        console.log(`User '${user.Username}' (${user.Id}) deleted by '${req.user.name}'.`);
         res.status(204).end();
     });
     app.post('/Users/:userId/Policy', (req, res) => {
         if (!req.user) return res.status(401).end();
         if (req.user.perms < 2) return res.status(403).end();
         const db = getDb();
-        const userId = req.params.userId;
-        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
-        let user = db.prepare("SELECT id, uuid FROM users WHERE uuid = ?").get(userId);
-        if (!user) user = db.prepare("SELECT id, uuid FROM users WHERE uuid = ?").get(withDashes);
-        if (!user) user = db.prepare("SELECT id, uuid FROM users WHERE id = ?").get(userId);
+        const user = resolveUser(db, req.params.userId);
         if (!user) return res.status(404).json({ error: "User not found." });
         const policy = req.body || {};
-        db.prepare("UPDATE users SET policy_json = ? WHERE id = ?").run(JSON.stringify(policy), user.id);
+        if (policy.IsAdministrator && user.Username === "root") {
+            return res.status(403).json({ error: "Cannot change root permissions." });
+        }
+        if (isLastAdmin(db, user) && policy.IsAdministrator === false) {
+            return res.status(403).send("There must be at least one user in the system with administrative access.");
+        }
+        const result = sql.setUserPolicy(db, user.Id, policy);
+        if (!result.success) return res.status(400).json({ error: result.reason });
+        res.status(204).end();
+    });
+    app.post('/Users/:userId/Configuration', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const user = resolveUser(db, req.params.userId);
+        if (!user) return res.status(404).json({ error: "User not found." });
+        const isSelf = user.Id === req.user.id;
+        if (!isSelf && req.user.perms < 2) return res.status(403).end();
+        const result = sql.setUserConfiguration(db, user.Id, req.body || {});
+        if (!result.success) return res.status(400).json({ error: result.reason });
+        res.status(204).end();
+    });
+    app.post('/Users/:userId/Password', (req, res) => {
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const user = resolveUser(db, req.params.userId);
+        if (!user) return res.status(404).json({ error: "User not found." });
+        const isSelf = user.Id === req.user.id;
+        if (!isSelf && req.user.perms < 2) return res.status(403).end();
+        const { NewPw, ResetPassword } = req.body || {};
+        if (ResetPassword) {
+            db.prepare("UPDATE Users SET Password = NULL WHERE Id = ?").run(user.Id);
+        } else if (NewPw) {
+            const result = sql.editUser(user.Id, { password: NewPw }, db);
+            if (!result.success) return res.status(400).json({ error: result.reason });
+        }
+        res.status(204).end();
+    });
+    app.post('/Users/:userId', (req, res) => {
+        // UpdateUser — the settings page POSTs the full user DTO here
+        if (!req.user) return res.status(401).end();
+        const db = getDb();
+        const user = resolveUser(db, req.params.userId);
+        if (!user) return res.status(404).json({ error: "User not found." });
+        const isSelf = user.Id === req.user.id;
+        if (!isSelf && req.user.perms < 2) return res.status(403).end();
+        const body = req.body || {};
+
+        const updates = {};
+        if (body.Name && body.Name !== user.Username) updates.name = body.Name;
+        if (body.Password) updates.password = body.Password;
+        if (Object.keys(updates).length) {
+            const result = sql.editUser(user.Id, updates, db);
+            if (!result.success) return res.status(400).json({ error: result.reason });
+        }
+        if (body.Policy) {
+            if (isLastAdmin(db, user) && body.Policy.IsAdministrator === false) {
+                return res.status(403).send("There must be at least one user in the system with administrative access.");
+            }
+            sql.setUserPolicy(db, user.Id, body.Policy);
+        }
+        if (body.Configuration) {
+            sql.setUserConfiguration(db, user.Id, body.Configuration);
+        }
         res.status(204).end();
     });
 
@@ -4401,7 +4674,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         if (!filePath) return null;
 
         let probe = null;
-        try { probe = await probeMedia(filePath); } catch {}
+        try { probe = await probeMedia(filePath); } catch { }
 
         var startPart = startTimeSec > 0 ? "-s" + Math.round(startTimeSec) : "";
         const existingKey = `${rawId}-a${audioStreamIndex != null ? audioStreamIndex : "0"}${startPart}`;

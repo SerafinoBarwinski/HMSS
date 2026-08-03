@@ -11,4 +11,8 @@
 !override.json.example
 /src/backend/profilepictures/*
 src/telerising/*
+
+# Yeah, Yeah, im working on smth. But its not ready yet.
+src/addons/retro-emulator
+
 info

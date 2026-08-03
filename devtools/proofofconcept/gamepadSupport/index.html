@@ -1,0 +1,99 @@
+<body>
+
+</body>
+<script>
+    let x = window.innerWidth / 2;
+    let y = window.innerHeight / 2;
+
+    const cursor = document.createElement("div");
+    cursor.style.cssText = `
+position:fixed;
+width:18px;
+height:18px;
+border:2px solid white;
+border-radius:50%;
+background:rgba(255,255,255,.2);
+pointer-events:none;
+left:0;
+top:0;
+transform:translate(-50%,-50%);
+z-index:999999;
+display:none;
+`;
+
+    document.body.appendChild(cursor);
+
+    let usingGamepad = false;
+    let lastMouseMove = Date.now();
+
+    document.addEventListener("mousemove", () => {
+        lastMouseMove = Date.now();
+        usingGamepad = false;
+        cursor.style.display = "none";
+    });
+
+    window.addEventListener("gamepadconnected", e => {
+        console.log("Gamepad:", e.gamepad);
+    });
+
+    function update() {
+        const gp = navigator.getGamepads()[0];
+
+        if (gp) {
+            const deadzone = 0.15;
+
+            let dx = Math.abs(gp.axes[0]) > deadzone ? gp.axes[0] : 0;
+            let dy = Math.abs(gp.axes[1]) > deadzone ? gp.axes[1] : 0;
+
+            if (dx || dy) {
+                usingGamepad = true;
+            }
+
+            if (usingGamepad) {
+                x += dx * 12;
+                y += dy * 12;
+
+                x = Math.max(0, Math.min(innerWidth, x));
+                y = Math.max(0, Math.min(innerHeight, y));
+
+                cursor.style.display = "";
+                cursor.style.left = `${x}px`;
+                cursor.style.top = `${y}px`;
+
+                const el = document.elementFromPoint(x, y);
+
+                if (el) {
+                    el.dispatchEvent(new MouseEvent("mousemove", {
+                        bubbles: true,
+                        clientX: x,
+                        clientY: y
+                    }));
+                }
+
+                if (gp.buttons[0].pressed && !update.lastPressed) {
+                    el?.dispatchEvent(new MouseEvent("mousedown", {
+                        bubbles: true,
+                        clientX: x,
+                        clientY: y
+                    }));
+                }
+
+                if (!gp.buttons[0].pressed && update.lastPressed) {
+                    el?.dispatchEvent(new MouseEvent("mouseup", {
+                        bubbles: true,
+                        clientX: x,
+                        clientY: y
+                    }));
+
+                    el?.click();
+                }
+
+                update.lastPressed = gp.buttons[0].pressed;
+            }
+        }
+
+        requestAnimationFrame(update);
+    }
+
+    update();
+</script>

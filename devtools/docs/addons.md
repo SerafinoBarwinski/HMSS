@@ -59,6 +59,9 @@ version: "1.0"
 description: "What this addon does"
 capabilities:
   - metadata          # see table below
+library:               # optional: media folders to expose (see "Library Capability")
+  - name: roms
+    path: /roms        # "/" = media folder root, "./" = addon directory
 mediaTypes:
   - movie
   - show
@@ -85,6 +88,7 @@ web:                  # optional: UI/route registration (see "Web / UI")
 | `capabilities` | string[] | Server-side capabilities the addon implements. |
 | `mediaTypes` | string[] | Optional media types (e.g. `movie`, `show`, `music`) the addon applies to. |
 | `dependency` | string[] | Addon IDs that must be present, otherwise the addon is skipped. |
+| `library` | object[] | Media folders exposed to the web client (see "Library Capability"). |
 | `web` | object | Web/UI registration (routes, scripts). See below. |
 
 ### Capabilities
@@ -97,6 +101,49 @@ web:                  # optional: UI/route registration (see "Web / UI")
 | `anime-artwork` | `findSeries(showName)`, `downloadBest(opts)` | Anime artwork + anime detection. |
 | `anime-meta` | `identify(input)` | Anime metadata. |
 | `ui` | `web` in manifest | Registers pages/scripts/menu items in the web client. |
+| `library` | none (declarative `library` section) | Exposes media folders to the web client for browsing/streaming. |
+
+---
+
+## Library Capability
+
+An addon can expose one or more media folders to the web client by declaring the
+`library` manifest field. Each entry is resolved at load time:
+
+```yaml
+capabilities:
+  - library
+library:
+  - name: roms          # arbitrary identifier used in API calls
+    path: /roms         # relative to the media folder root (media/)
+  - name: local
+    path: ./roms        # relative to the addon directory
+```
+
+Path prefixes:
+
+| Prefix | Resolves to |
+|---|---|
+| `/` | the media folder root (the common parent of `movie`/`music`/`shows`/`unsorted`), e.g. `/roms` → `media/roms` |
+| `./` | the addon directory |
+| none | treated like `/` (media folder root) |
+
+The single-key shorthand `- roms: /roms` is also accepted. Library root directories are
+created automatically at startup if missing. Anything can be nested inside (e.g.
+`media/roms/Nintendo/SNES/My Game.sfc`).
+
+The loader exposes them through `getAddonLibraries()` and
+`resolveAddonLibraryFile(addonId, libName, relPath)` (path-traversal safe). The web client
+can use the built-in API (all require authentication):
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/addons/library` | List all addon libraries (`addon`, `addonName`, `name`, `path`, `base`). |
+| `GET /api/addons/library/:addonId/:name/list?path=<rel>` | Directory listing: `{ path, dirs: [{name,path}], files: [{name,path,size}] }`. |
+| `GET /api/addons/library/:addonId/:name/file?path=<rel>&accessToken=<token>` | Stream a file from the library. |
+
+`path` is always relative to the library root; `..` is blocked. The `base` field tells the
+client whether the folder lives in the media tree (`media`) or inside the addon (`addon`).
 
 ---
 
@@ -164,16 +211,30 @@ export async function init(config) {
 | `downloadBest` | `downloadBest({ tmdbId, type, targetDir })` | media organizer (`downloadArtwork`) |
 | `findSeries` | `findSeries(showName)` | anime detection (`isAnime`) |
 | `getImageUrl` / `allImageUrls` | helper exports | addon-specific |
-| `registerRoutes` | `registerRoutes(app, { getDb })` | backend route registration (see below) |
+| `registerRoutes` | `registerRoutes(app, { getDb, addonDir, express })` | backend route registration (see below) |
 
 ---
 
 ## Backend Routes
 
 An addon can register its own HTTP endpoints by exporting `registerRoutes`.
+The loader calls it once at startup and passes a context object:
+
+| Context | Description |
+|---|---|
+| `app` | The Express app (first argument). |
+| `getDb` | Returns the SQLite database handle. |
+| `addonDir` | Absolute path to the addon directory — use this for serving addon-local files. |
+| `express` | The Express module (so addons don't need their own `node_modules` to serve static files). |
+| `mediaDirs` | The server's media directories (`{ movie: [...], music: [...], shows: [...], unsorted: [...] }`). |
+| `libraries` | This addon's resolved library entries (`[{ name, path, base, raw }]`). |
 
 ```js
-export function registerRoutes(app, { getDb }) {
+import path from "node:path";
+
+export function registerRoutes(app, { getDb, addonDir, express }) {
+    app.use('/my-addon/static', express.static(path.join(addonDir, "static")));
+
     app.get("/my-addon/things", (req, res) => {
         // req.user is available: the global auth middleware runs before
         // addon routes are mounted (null if not authenticated)
@@ -184,7 +245,6 @@ export function registerRoutes(app, { getDb }) {
 }
 ```
 
-The loader calls `registerRoutes` once at startup for every addon that exports it.
 Routes are mounted after the global `authMiddleware`, so `req.user` is populated when a valid
 token is sent (`X-Emby-Authorization` / `Authorization: Bearer` / `?api_key=`).
 
@@ -365,6 +425,7 @@ web:
 ## Notes
 
 - Addons are loaded once at server startup from `src/addons/`. Adding/removing an addon requires a restart.
+- Addon directories may be **symlinks** (e.g. develop in a separate folder and `ln -s /path/to/addon src/addons/<id>`); the loader resolves them. Note that relative imports inside a symlinked `addon.js` resolve from the symlink's real target location.
 - Enabling/disabling an addon (`PATCH /api/addons/:addonId`, body `{ "enabled": bool }`) persists the flag in the database and takes effect on the next restart.
 - If an addon's `dependency` references a missing addon, the addon is skipped.
 - Errors inside a single addon's `init`/`registerRoutes`/capability calls never crash the server — they are caught and logged as warnings.

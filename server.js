@@ -57,6 +57,7 @@ export {
 }
 
 const args = process.argv.slice(2);
+let migrateFrom = null;
 
 for (const arg of args) {
     switch (arg) {
@@ -92,7 +93,11 @@ for (const arg of args) {
             DEBUG_TEA_POT = true;
             break;
         default:
-            console.log(`Unknown argument(s): ${arg}`);
+            if (arg.startsWith("--migrate=")) {
+                migrateFrom = arg.slice("--migrate=".length);
+            } else {
+                console.log(`Unknown argument(s): ${arg}`);
+            }
     }
 }
 
@@ -102,6 +107,17 @@ const init = await sql.init("root", db, argon2)
 if (!init.succes) {
     console.log(init.reason + " === " + init.reason || undefined)
     exit(1)
+}
+
+if (migrateFrom) {
+    const { migrateJellyfinDb } = await import("./src/backend/migrate.js");
+    const result = migrateJellyfinDb(migrateFrom, db);
+    if (!result.success) {
+        console.error(`[Migrate] Failed: ${result.error}`);
+        exit(1);
+    }
+    const s = result.stats;
+    console.log(`[Migrate] Imported from ${migrateFrom}: users=${s.users} updated=${s.updated} skipped=${s.skipped} devices=${s.devices} permissions=${s.permissions} preferences=${s.preferences} schedules=${s.schedules}`);
 }
 
 // Check integrity of the database and media files, except if the user has explicitly requested to skip the check.
@@ -124,7 +140,7 @@ console.log(figlet.textSync("\nHMSS", {
 
 
 const addonConfig = {};
-export const addons = await addonLoader.loadAddons(addonConfig, db);
+export const addons = await addonLoader.loadAddons(addonConfig, db, mediaDirs);
 
 export async function StartMediaIndex() {
     console.log("The indexer has started. This may take a while...")
@@ -215,7 +231,7 @@ globalThis.__hmssDebugAcceptRemote = DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG;
 
 await webserver.hmssRoutes(app, getDb, JPI_Version, port, mediaDirs)
 await webserver.jellyfinRoutes(app, getDb, JPI_Version, mediaDirs, port)
-await webserver.addonRoutes(app, getDb)
+await webserver.addonRoutes(app, getDb, mediaDirs)
 telerisingRoutes(app, getDb, port)
 
 // HMSS injection: patch index.html at serve time so Jellyfin web files stay vanilla
@@ -251,6 +267,7 @@ const server = app.listen(port, "0.0.0.0", async () => {
     }
 
     is_server_ready = true;
+    console.log("Server is Ready!")
 });
 
 const wss = new WebSocketServer({ server, path: "/socket" });

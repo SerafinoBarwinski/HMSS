@@ -11,7 +11,11 @@ Jellyfin clients (Mobile, Web, etc.) strictly require UUID-formatted identifiers
 | User `Id` | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | `a9e2ec81-f9fb-419d-a0c0-f782ae618a20` |
 | Server `Id` | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | `ef71ba80-3b5d-48c9-a175-5fad144fe7bb` |
 
-These are generated server-side and are not user-selectable. The internal DB uses auto-increment integers as primary keys; UUIDs are mapped via a separate column for API exposure.
+These are generated server-side and are not user-selectable. Since the user
+schema migration, HMSS stores users in a Jellyfin-identical table layout where
+`Id` is the UUID primary key directly (no separate integer mapping). This also
+allows adopting an existing Jellyfin database via `node server.js
+--migrate=/path/to/jellyfin.db`.
 
 ## Known Client Quirks
 

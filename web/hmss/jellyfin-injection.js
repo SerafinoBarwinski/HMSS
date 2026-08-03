@@ -291,7 +291,8 @@ function injectPersistentScripts() {
 
 async function loadHMSSPage() {
     const hash = window.location.hash;
-    const menuItem = _hmssRoutes.find(item => item.link === hash);
+    const hashPath = hash.split("?")[0];
+    const menuItem = _hmssRoutes.find(item => item.link === hashPath);
     if (!menuItem) { _hmssPageLoaded = null; return; }
 
     const fallbackPage = document.getElementById("fallbackPage");
@@ -356,6 +357,134 @@ pageObserver.observe(document.body, {
     childList: true,
     subtree: true
 });
+
+// --- Gamepad controller support (virtual cursor) ---
+// Left stick = cursor, A = enter/click, B = back, right stick = scroll.
+// Disabled while a game runs in the emulator (native gamepad support there).
+(function () {
+    function isEmulatorActive() {
+        var wrap = document.getElementById('emuFrameWrap');
+        return !!(wrap && wrap.style.display !== 'none');
+    }
+
+    var cursor = null;
+    function ensureCursor() {
+        if (cursor) return;
+        cursor = document.createElement('div');
+        cursor.id = 'hmssCursor';
+        cursor.style.cssText = 'position:fixed;left:0;top:0;width:22px;height:22px;pointer-events:none;z-index:2147483000;display:none;';
+        cursor.innerHTML = '<svg width="22" height="22" viewBox="0 0 22 22"><path d="M2 1 L2 16 L7 11.5 L10.5 18.5 L13.5 17 L10 10 L16 10 Z" fill="#fff" stroke="#111" stroke-width="1.4"/></svg>';
+        document.body.appendChild(cursor);
+    }
+
+    var hideStyle = null;
+    function setControllerMode(on) {
+        ensureCursor();
+        if (on) {
+            cursor.style.display = 'block';
+            if (!hideStyle) {
+                hideStyle = document.createElement('style');
+                hideStyle.id = 'hmssCursorHide';
+                hideStyle.textContent = '*{cursor:none!important}';
+                document.head.appendChild(hideStyle);
+            }
+        } else {
+            cursor.style.display = 'none';
+            if (hideStyle) { hideStyle.remove(); hideStyle = null; }
+        }
+    }
+
+    var pos = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    var last = performance.now();
+    var aHeld = false;
+    var bHeld = false;
+
+    function navBack() {
+        var before = window.location.href;
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+        document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+        setTimeout(function () {
+            if (window.location.href === before && history.length > 1) history.back();
+        }, 350);
+    }
+
+    function clickAt(x, y) {
+        var el = document.elementFromPoint(x, y);
+        if (!el) return;
+        var act = el.closest('a, button, .card, .btn, [data-action], [is="emby-linkbutton"], [is="emby-button"]') || el;
+        var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+        act.dispatchEvent(new MouseEvent('mousedown', opts));
+        act.dispatchEvent(new MouseEvent('mouseup', opts));
+        act.dispatchEvent(new MouseEvent('click', opts));
+    }
+
+    function loop() {
+        requestAnimationFrame(loop);
+        if (isEmulatorActive()) { setControllerMode(false); return; }
+
+        var pads = [];
+        try { pads = navigator.getGamepads() || []; } catch (e) { }
+        var pad = null;
+        for (var i = 0; i < pads.length; i++) {
+            if (pads[i] && pads[i].connected) { pad = pads[i]; break; }
+        }
+        if (!pad) { setControllerMode(false); return; }
+
+        var ax = pad.axes[0] || 0;
+        var ay = pad.axes[1] || 0;
+        var dead = 0.18;
+        var mag = Math.sqrt(ax * ax + ay * ay);
+        if (mag < dead) { ax = 0; ay = 0; mag = 0; }
+        else {
+            var norm = Math.min(1, (mag - dead) / (1 - dead));
+            ax = (ax / mag) * norm;
+            ay = (ay / mag) * norm;
+            mag = norm;
+        }
+
+        var rx = pad.axes[2] || 0;
+        var ry = pad.axes[3] || 0;
+        var rMag = Math.sqrt(rx * rx + ry * ry);
+        if (rMag < dead) { rx = 0; ry = 0; }
+
+        var a = !!(pad.buttons[0] && pad.buttons[0].pressed);
+        var b = !!(pad.buttons[1] && pad.buttons[1].pressed);
+
+        if (!mag && !a && !b && rMag < dead) { setControllerMode(false); return; }
+        setControllerMode(true);
+
+        var now = performance.now();
+        var dt = Math.min((now - last) / 1000, 0.05);
+        last = now;
+
+        var speed = 1200;
+        var boost = 1 + mag * mag * 3;
+        pos.x += ax * speed * boost * dt;
+        pos.y += ay * speed * boost * dt;
+        pos.x = Math.max(0, Math.min(window.innerWidth - 1, pos.x));
+        pos.y = Math.max(0, Math.min(window.innerHeight - 1, pos.y));
+        cursor.style.left = pos.x + 'px';
+        cursor.style.top = pos.y + 'px';
+
+        if (ry) {
+            document.dispatchEvent(new WheelEvent('wheel', { deltaY: -ry * 600 * dt, bubbles: true, cancelable: true }));
+        }
+        if (rx) {
+            document.dispatchEvent(new WheelEvent('wheel', { deltaX: -rx * 400 * dt, bubbles: true, cancelable: true }));
+        }
+
+        if (a && !aHeld) clickAt(pos.x, pos.y);
+        aHeld = a;
+        if (b && !bHeld) navBack();
+        bHeld = b;
+    }
+
+    document.addEventListener('mousemove', function () {
+        if (cursor && cursor.style.display === 'block') setControllerMode(false);
+    }, true);
+
+    requestAnimationFrame(loop);
+})();
 
 createFeaturesButton();
 bootHMSS();

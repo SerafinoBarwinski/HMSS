@@ -1,4 +1,3 @@
-import argon2 from "argon2";
 import crypto from "node:crypto";
 import { createReadStream } from "node:fs";
 import { writeFile, mkdir, unlink, stat } from "node:fs/promises";
@@ -46,6 +45,28 @@ export function requireAuth(req, res, next) {
     next();
 }
 
+export function hashLogoPath(logoPath) {
+    let hash = 0;
+    for (let i = 0; i < logoPath.length; i++) {
+        const ch = logoPath.charCodeAt(i);
+        hash = ((hash << 5) - hash) + ch;
+        hash |= 0;
+    }
+    return Math.abs(hash).toString(16).padStart(32, "0");
+}
+
+export function resolveUser(db, userId) {
+    if (!userId) return null;
+    const withDashes = String(userId).replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
+    const upper = String(userId).toUpperCase();
+    return (
+        sql.getUserById(db, userId) ||
+        sql.getUserById(db, withDashes) ||
+        sql.getUserById(db, upper) ||
+        sql.getUserById(db, upper.replace(/-/g, ""))
+    );
+}
+
 export function hmssAuthRoutes(app, getDb) {
     app.post("/Users/AuthenticateByName", async (req, res) => {
         const db = getDb();
@@ -57,7 +78,14 @@ export function hmssAuthRoutes(app, getDb) {
             return res.status(400).json({ error: "Username and password required." });
         }
 
-        const result = await sql.loginUser(name, password, db, argon2);
+        const deviceInfo = {
+            AppName: req.body.AppName || "HMSS",
+            AppVersion: req.body.AppVersion || "1.0.0",
+            DeviceName: req.body.DeviceName || "HMSS",
+            DeviceId: req.body.DeviceId || "hmss-server",
+        };
+
+        const result = await sql.loginUser(name, password, db, deviceInfo);
         if (!result.success) {
             return res.status(401).json({ error: result.reason });
         }
@@ -65,7 +93,7 @@ export function hmssAuthRoutes(app, getDb) {
         const sys = sql.getSystemInfo(db);
         const serverId = sys?.id || "hmss-local";
 
-        const u = db.prepare("SELECT * FROM users WHERE name = ?").get(name);
+        const u = sql.getUserById(db, result.user.id);
         const commands = ["MoveUp","MoveDown","MoveLeft","MoveRight","PageUp","PageDown",
             "PreviousLetter","NextLetter","ToggleOsd","ToggleContextMenu","Select","Back",
             "SendKey","SendString","GoHome","GoToSettings","VolumeUp","VolumeDown",
@@ -75,15 +103,15 @@ export function hmssAuthRoutes(app, getDb) {
             "PlayMediaSource","PlayTrailers"];
 
         res.json({
-            User: formatUser(u, serverId),
+            User: formatUser(u, serverId, db),
             SessionInfo: {
                 PlayState: { CanSeek: false, IsPaused: false, IsMuted: false, RepeatMode: "RepeatNone", PlaybackOrder: "Default" },
                 AdditionalUsers: [],
                 Capabilities: { PlayableMediaTypes: ["Audio","Video"], SupportedCommands: commands, SupportsMediaControl: true, SupportsPersistentIdentifier: false },
                 PlayableMediaTypes: ["Audio","Video"],
                 Id: result.accessToken,
-                UserId: u.uuid || u.id,
-                UserName: u.name,
+                UserId: result.user.id,
+                UserName: result.user.name,
                 Client: "HMSS",
                 LastActivityDate: new Date().toISOString(),
                 LastPlaybackCheckIn: "0001-01-01T00:00:00.0000000Z",
@@ -147,11 +175,16 @@ export function hmssAuthRoutes(app, getDb) {
         if (entry.authorized && entry.userId) {
             quickConnectCodes.delete(entry.code);
             const db = getDb();
-            const token = crypto.randomUUID();
-            const user = db.prepare("SELECT * FROM users WHERE id = ?").get(entry.userId);
+            const user = sql.getUserById(db, entry.userId);
             if (!user) return res.json({ Authenticated: false });
 
-            db.prepare("INSERT INTO sessions (token, user_id) VALUES (?, ?)").run(token, user.id);
+            const session = sql.createSession(db, entry.userId, {
+                DeviceId: entry.deviceId,
+                DeviceName: entry.deviceName,
+                AppName: entry.appName,
+                AppVersion: entry.appVersion,
+            });
+            const token = session.accessToken;
 
             res.json({
                 Authenticated: true,
@@ -192,7 +225,7 @@ export function hmssAuthRoutes(app, getDb) {
         }
 
         entry.authorized = true;
-        entry.userId = parseInt(req.user.id);
+        entry.userId = req.user.id;
 
         console.log(`Quick Connect code ${code} authorized by user ${req.user.name}`);
 
@@ -213,26 +246,31 @@ export function hmssAuthRoutes(app, getDb) {
             return res.status(401).json({ error: "Quick Connect not authorized." });
         }
 
-        const user = db.prepare("SELECT * FROM users WHERE id = ?").get(entry.userId);
+        const user = sql.getUserById(db, entry.userId);
         if (!user) return res.status(404).json({ error: "User not found." });
 
-        const token = crypto.randomUUID();
-        db.prepare("INSERT INTO sessions (token, user_id) VALUES (?, ?)").run(token, user.id);
+        const session = sql.createSession(db, entry.userId, {
+            DeviceId: entry.deviceId,
+            DeviceName: entry.deviceName,
+            AppName: entry.appName,
+            AppVersion: entry.appVersion,
+        });
+        const token = session.accessToken;
         quickConnectCodes.delete(entry.code);
 
         const sys = sql.getSystemInfo(db);
         const serverId = sys?.id || "hmss-local";
 
         res.json({
-            User: formatUser(user, serverId),
+            User: formatUser(user, serverId, db),
             SessionInfo: {
                 PlayState: { CanSeek: false, IsPaused: false, IsMuted: false, RepeatMode: "RepeatNone", PlaybackOrder: "Default" },
                 AdditionalUsers: [],
                 Capabilities: { PlayableMediaTypes: ["Audio","Video"], SupportedCommands: [], SupportsMediaControl: true, SupportsPersistentIdentifier: false },
                 PlayableMediaTypes: ["Audio","Video"],
                 Id: token,
-                UserId: user.uuid || user.id,
-                UserName: user.name,
+                UserId: user.Id,
+                UserName: user.Username,
                 Client: "HMSS Quick Connect",
                 LastActivityDate: new Date().toISOString(),
                 LastPlaybackCheckIn: "0001-01-01T00:00:00.0000000Z",
@@ -276,129 +314,52 @@ export function hmssAuthRoutes(app, getDb) {
         res.status(204).end();
     });
 
-    function hashLogoPath(logoPath) {
-        let hash = 0;
-        for (let i = 0; i < logoPath.length; i++) {
-            const ch = logoPath.charCodeAt(i);
-            hash = ((hash << 5) - hash) + ch;
-            hash |= 0;
-        }
-        return Math.abs(hash).toString(16).padStart(32, "0");
-    }
-
-    function formatUser(u, serverId) {
-        const p = u.perms;
-        const isAdmin = p >= 2;
-        const isRoot = p >= 3;
-        let storedPolicy = null;
-        try { if (u.policy_json) storedPolicy = JSON.parse(u.policy_json); } catch {}
-        const defaultPolicy = {
-                IsAdministrator: isAdmin,
-                IsHidden: isRoot,
-                EnableCollectionManagement: false,
-                EnableSubtitleManagement: false,
-                EnableLyricManagement: false,
-                IsDisabled: false,
-                BlockedTags: [],
-                AllowedTags: [],
-                EnableUserPreferenceAccess: true,
-                AccessSchedules: [],
-                BlockUnratedItems: [],
-                EnableRemoteControlOfOtherUsers: p >= 2,
-                EnableSharedDeviceControl: true,
-                EnableRemoteAccess: p >= 1,
-                EnableLiveTvManagement: false,
-                EnableLiveTvAccess: p >= 1,
-                EnableMediaPlayback: true,
-                EnableAudioPlaybackTranscoding: true,
-                EnableVideoPlaybackTranscoding: true,
-                EnablePlaybackRemuxing: true,
-                ForceRemoteSourceTranscoding: false,
-                EnableContentDeletion: p >= 2,
-                EnableContentDeletionFromFolders: [],
-                EnableContentDownloading: true,
-                EnableSyncTranscoding: true,
-                EnableMediaConversion: isAdmin,
-                EnabledDevices: [],
-                EnableAllDevices: true,
-                EnabledChannels: [],
-                EnableAllChannels: true,
-                EnabledFolders: [],
-                EnableAllFolders: true,
-                InvalidLoginAttemptCount: 0,
-                LoginAttemptsBeforeLockout: -1,
-                MaxActiveSessions: 0,
-                EnablePublicSharing: true,
-                BlockedMediaFolders: [],
-                BlockedChannels: [],
-                RemoteClientBitrateLimit: 0,
-                AuthenticationProviderId: "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
-                PasswordResetProviderId: "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
-                SyncPlayAccess: "CreateAndJoinGroups",
-        };
+    function formatUser(u, serverId, db) {
+        const policy = sql.getUserPolicy(db, u.Id);
+        const config = sql.getUserConfiguration(db, u.Id);
+        const logoPath = sql.getUserImage(db, u.Id)?.logo_path || null;
         return {
-            Name: u.name,
+            Name: u.Username,
             ServerId: serverId || "hmss-local",
-            Id: (u.uuid || "").replace(/-/g, ""),
-            HasPassword: true,
-            HasConfiguredPassword: true,
+            Id: u.Id.replace(/-/g, ""),
+            HasPassword: Boolean(u.Password),
+            HasConfiguredPassword: Boolean(u.Password),
             HasConfiguredEasyPassword: false,
-            EnableAutoLogin: false,
-            LastActivityDate: new Date().toISOString(),
-            PrimaryImageTag: u.logo_path ? hashLogoPath(u.logo_path) : null,
-            Configuration: {
-                PlayDefaultAudioTrack: true,
-                SubtitleLanguagePreference: "",
-                DisplayMissingEpisodes: false,
-                GroupedFolders: [],
-                SubtitleMode: "Default",
-                DisplayCollectionsView: false,
-                EnableLocalPassword: false,
-                OrderedViews: [],
-                LatestItemsExcludes: [],
-                MyMediaExcludes: [],
-                HidePlayedInLatest: true,
-                RememberAudioSelections: true,
-                RememberSubtitleSelections: true,
-                EnableNextEpisodeAutoPlay: true,
-                CastReceiverId: "F007D354",
-            },
-            Policy: storedPolicy ? { ...defaultPolicy, ...storedPolicy } : defaultPolicy,
+            EnableAutoLogin: Boolean(u.EnableAutoLogin),
+            LastActivityDate: u.LastActivityDate || new Date().toISOString(),
+            PrimaryImageTag: logoPath ? hashLogoPath(logoPath) : null,
+            Configuration: config,
+            Policy: policy,
         };
     }
 
     app.get("/Users/Public", (req, res) => {
         const db = getDb();
         const sys = sql.getSystemInfo(db);
-        const users = db.prepare("SELECT * FROM users WHERE name != 'root' ORDER BY id").all();
-        res.json(users.map(u => formatUser(u, sys?.id)));
+        const users = sql.getAllUsers(db).filter(u => u.Username !== "root");
+        res.json(users.map(u => formatUser(u, sys?.id, db)));
     });
 
     app.get("/Users", (req, res) => {
         if (!req.user) return res.status(401).json({ error: "Unauthorized." });
         const db = getDb();
         const sys = sql.getSystemInfo(db);
-        const users = db.prepare("SELECT * FROM users WHERE name != 'root' ORDER BY id").all();
-        res.json(users.map(u => formatUser(u, sys?.id)));
+        const users = sql.getAllUsers(db).filter(u => u.Username !== "root");
+        res.json(users.map(u => formatUser(u, sys?.id, db)));
     });
 
     app.get("/Users/:userId", (req, res) => {
         if (!req.user) return res.status(401).json({ error: "Unauthorized." });
         const db = getDb();
         const sys = sql.getSystemInfo(db);
-        const userId = req.params.userId;
-        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
-
-        let user = db.prepare("SELECT * FROM users WHERE uuid = ?").get(userId);
-        if (!user) user = db.prepare("SELECT * FROM users WHERE uuid = ?").get(withDashes);
-        if (!user) user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+        const user = resolveUser(db, req.params.userId);
         if (!user) return res.status(404).json({ error: "User not found." });
 
-        if (user.name === "root" && req.user.perms < 3) {
+        if (user.Username === "root" && req.user.perms < 3) {
             return res.status(404).json({ error: "User not found." });
         }
 
-        res.json(formatUser(user, sys?.id));
+        res.json(formatUser(user, sys?.id, db));
     });
 
     // ---- Profile Pictures ----
@@ -410,12 +371,14 @@ export function hmssAuthRoutes(app, getDb) {
 
     app.post("/Users/:userId/Images/Primary", (req, res) => {
         if (!req.user) return res.status(401).end();
-        const userId = req.params.userId;
-        const isSelf = req.user.id === userId || req.user.uuid.replace(/-/g, "") === userId.replace(/-/g, "");
-        if (!isSelf && !req.user.perms < 2) {
+        const db = getDb();
+        const target = resolveUser(db, req.params.userId);
+        if (!target) return res.status(404).end();
+        const isSelf = target.Id === req.user.id;
+        if (!isSelf && req.user.perms < 2) {
             return res.status(403).end();
         }
-        handleUpload(req, res, userId);
+        handleUpload(req, res, target.Id);
     });
 
     function handleUpload(req, res, userId) {
@@ -440,20 +403,18 @@ export function hmssAuthRoutes(app, getDb) {
 
             try {
                 const db = getDb();
-                const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
-                const resolved = db.prepare("SELECT id, logo_path FROM users WHERE uuid = ? OR uuid = ? OR id = ?").get(userId, withDashes, userId);
-                const realId = resolved ? resolved.id : null;
+                const realId = resolveUser(db, userId)?.Id;
                 if (!realId) return res.status(404).end();
 
                 // delete old profile picture if one exists
-                const oldPath = resolved?.logo_path;
+                const oldPath = sql.getUserImage(db, realId)?.logo_path;
                 if (oldPath) {
                     unlink(path.join(__authDirname, oldPath)).catch(() => {});
                 }
 
                 await writeFile(filePath, buffer);
                 const relativePath = `profilepictures/${filename}`;
-                db.prepare("UPDATE users SET logo_path = ? WHERE id = ?").run(relativePath, realId);
+                sql.setUserImage(db, realId, relativePath);
                 console.log(`Profile picture saved: ${filePath} (${buffer.length} bytes)`);
                 res.status(204).end();
             } catch (e) {
@@ -507,13 +468,12 @@ export function hmssAuthRoutes(app, getDb) {
         const userId = req.params.userId || req.query.userId || req.user?.id;
         if (!userId) return res.status(401).end();
 
-        const withDashes = userId.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
-        let user = db.prepare("SELECT logo_path FROM users WHERE uuid = ?").get(userId);
-        if (!user) user = db.prepare("SELECT logo_path FROM users WHERE uuid = ?").get(withDashes);
-        if (!user) user = db.prepare("SELECT logo_path FROM users WHERE id = ?").get(userId);
-        if (!user || !user.logo_path) return res.status(404).end();
+        const user = resolveUser(db, userId);
+        if (!user) return res.status(404).end();
+        const logoPath = sql.getUserImage(db, user.Id)?.logo_path;
+        if (!logoPath) return res.status(404).end();
 
-        const filePath = path.join(__authDirname, user.logo_path);
+        const filePath = path.join(__authDirname, logoPath);
         stat(filePath).then(s => {
             const ext = path.extname(filePath);
             const mimeMap = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
@@ -527,12 +487,12 @@ export function hmssAuthRoutes(app, getDb) {
     app.delete("/UserImage", (req, res) => {
         if (!req.user) return res.status(401).end();
         const db = getDb();
-        const user = db.prepare("SELECT logo_path FROM users WHERE id = ?").get(req.user.id);
-        if (!user || !user.logo_path) return res.status(204).end();
+        const logoPath = sql.getUserImage(db, req.user.id)?.logo_path;
+        if (!logoPath) return res.status(204).end();
 
-        const filePath = path.join(__authDirname, user.logo_path);
+        const filePath = path.join(__authDirname, logoPath);
         unlink(filePath).catch(() => {});
-        db.prepare("UPDATE users SET logo_path = NULL WHERE id = ?").run(req.user.id);
+        sql.clearUserImage(db, req.user.id);
         res.status(204).end();
     });
 }

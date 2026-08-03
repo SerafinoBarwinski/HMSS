@@ -53,11 +53,32 @@ connect with Jellyfin Mobile / Findroid.
 On first start, the Setup Wizard guides you through creating the admin account
 and configuring server settings.
 
+## Migrating from Jellyfin
+
+If you already run a Jellyfin server, HMSS can adopt its user database. HMSS
+stores users in the same schema as Jellyfin, so existing accounts, passwords,
+permissions and preferences carry over 1:1:
+
+```bash
+node server.js --migrate=/path/to/jellyfin.db
+```
+
+Imported: users (username, password hash, settings, login data), devices /
+sessions (existing logins stay valid), and per-user **Permissions**,
+**Preferences** and **AccessSchedules**.
+
+Conflict handling: a user with the same ID is skipped, a user with the same
+username is updated in place, otherwise a new user is created. Profile pictures
+are not stored in the Jellyfin database (they are files on disk) and are not
+migrated.
+
 ## Override Arguments
 
 #### Common
 - `--debug`: Enables verbose logging
 - `--port`: Changes the web server port
+- `--migrate=<path>`: Imports users, devices and their permissions from an
+  existing Jellyfin database into HMSS. See [Migrating from Jellyfin](#migrating-from-jellyfin).
 
 #### Development
 - `--fail-integrity-check`: Forces the integrity check to fail, even if all
@@ -88,15 +109,16 @@ and posters from TMDB and Fanart.tv.
 ## What Works
 
 Most of the core Jellyfin experience is functional: authentication (password,
-Quick Connect, sessions), media browsing with most filtering and suggestions,
+Quick Connect, sessions), full Jellyfin user management with per-user
+permissions, preferences and access schedules, media browsing with most
+filtering and suggestions,
 direct-play streaming with seeking support, Live TV via Telerising IPTV
 (channel listing, HLS proxy, EPG), metadata enrichment from TMDB, MusicBrainz,
 and Fanart.tv, a plugin/addon system, threaded background media scanning,
 and the full Jellyfin Web UI. Discovery (UDP, WebSocket), localization, system
 info, rate limiting, and spam protection are all working too.
 
-**What's still missing or limited:** Per-user permissions are currently basic
-— only admin and regular user roles exist. Real physical tuner discovery,
+**What's still missing or limited:** Real physical tuner discovery,
 Schedules Direct integration, and IPTV recording functionality are not yet
 implemented. A few minor bugs exist here and there, but nothing that should
 get in the way of everyday use.
