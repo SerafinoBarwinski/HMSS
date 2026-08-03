@@ -1,8 +1,9 @@
 import { getAddons, getAllAddons, getAddonsByCapability, searchAll, getWebRegistry, getAddonWebFiles, getAddonDir, registerAddonBackendRoutes, getAddonLibraries, resolveAddonLibraryFile } from "./addon_loader.js";
+import { generateLibBackdrop, backdropTagForLib, pickBackdropPath, renderLibBackdropForQuery } from "./lib_backdrop.js";
 import { authMiddleware, hmssAuthRoutes, hashLogoPath, resolveUser } from "./auth.js";
 import * as sql from "./sql.js";
 import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems, getAddonRow, getAllAddonRows, setAddonConfig, setAddonEnabled, getUserById, getUserByName, getUserCount, addUser, removeUser, editUser, getUserPolicy, setUserPolicy, getUserConfiguration, setUserConfiguration, getUserImage } from "./sql.js";
-import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
+import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, findBackdropInDir, findAllImagesInDir, findAllBackdropsInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { ADDON_COLLECTION_TYPE, browseAddonLibrary, collectionIdFor, getAddonCollections, getAddonLibraryItem, isAddonLibraryId, makeCollectionItem, resolveLibraryImage } from "./addon_library.js";
 import { getItemMeta } from "./meta_reader.js";
@@ -13,7 +14,7 @@ import * as codecs from "./codecs.js";
 import * as transcoder from "./transcoder.js";
 import * as server from "../../server.js";
 
-import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream, globSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync, statfsSync, createReadStream, globSync, writeFileSync, unlinkSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
@@ -686,6 +687,182 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         return null;
     }
 
+    function resolveItemDir(rawId) {
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
+        const dirOf = (fp) => fp.substring(0, fp.lastIndexOf("/"));
+        for (const ep of index.shows || []) {
+            if (generateItemId(ep.id || ep.filePath) === rawId) return dirOf(ep.filePath);
+            if (generateItemId(ep.showName) === rawId) return `media/shows/${ep.showName}`;
+            if (generateItemId(`${ep.showName}-s${ep.season}`) === rawId) return dirOf(ep.filePath);
+        }
+        for (const m of index.movies || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) return dirOf(m.filePath);
+        }
+        for (const m of index.music || []) {
+            if (generateItemId(m.id || m.filePath) === rawId) return dirOf(m.filePath);
+        }
+        for (const u of index.unsorted || []) {
+            if (generateItemId(u.id || u.filePath) === rawId) return dirOf(u.filePath);
+        }
+        return null;
+    }
+
+    const IMAGE_BASE_NAMES = {
+        primary: "poster",
+        backdrop: "hero",
+        logo: "logo",
+        thumb: "thumb",
+        banner: "banner",
+        disc: "disc",
+        art: "clearart",
+    };
+
+    function nextBackdropIndex(dir) {
+        let max = -1;
+        try {
+            for (const f of readdirSync(dir)) {
+                const m = /^hero(\d*)\.(jpe?g|png|webp)$/i.exec(f);
+                if (!m) continue;
+                const idx = m[1] === "" ? 0 : parseInt(m[1], 10) - 1;
+                if (idx > max) max = idx;
+            }
+        } catch {}
+        return max + 1;
+    }
+
+    const downloadRemoteImage = async (req, res) => {
+        const rawId = (req.params.itemId || "").replace(/-/g, "");
+        const type = (req.query.type ?? req.query.Type ?? "Primary").toLowerCase();
+        const imageUrl = req.query.url ?? req.query.ImageUrl ?? req.query.imageUrl ?? "";
+        const problem = (detail, status = 404) => res.status(status).json({
+            type: "https://hmss.local/problems/image-download-failed",
+            title: "Image download failed",
+            status,
+            detail,
+            instance: req.originalUrl,
+        });
+
+        if (!/^https?:\/\//i.test(imageUrl)) return problem(`Invalid ImageUrl: "${imageUrl}"`);
+
+        const dir = resolveItemDir(rawId);
+        if (!dir) return problem(`No item matches id ${req.params.itemId}`);
+
+        const baseName = IMAGE_BASE_NAMES[type] || "poster";
+
+        // 1) download the payload first; only a fully successful download may
+        //    proceed (no premature 204) -- then 2) write it to disk
+        let buf, ext;
+        try {
+            const r = await fetch(imageUrl, {
+                redirect: "follow",
+                headers: { "User-Agent": "HMSS/1.0 (jellyfin-compatible)", Accept: "image/*" },
+            });
+            if (!r.ok) return problem(`Provider returned HTTP ${r.status}`);
+            const ct = (r.headers.get("content-type") || "").split(";")[0].trim();
+            if (ct && !ct.startsWith("image/")) return problem(`Provider returned non-image content-type "${ct}"`);
+            buf = Buffer.from(await r.arrayBuffer());
+            if (!buf.length) return problem("Provider returned an empty body");
+            let m = null;
+            try { m = /\.(jpe?g|png|webp|gif|avif)$/i.exec(new URL(imageUrl).pathname); } catch { }
+            ext = m ? m[1].toLowerCase() : (ct.split("/")[1] || "jpg").toLowerCase();
+            if (ext === "jpeg") ext = "jpg";
+            if (!["jpg", "png", "webp", "gif", "avif"].includes(ext)) ext = "jpg";
+        } catch (e) {
+            return problem(e?.message || String(e));
+        }
+
+        // remove stale files of the same image type so the newly written one wins
+        // (except Backdrop: multiple backdrops are allowed, old ones are kept)
+        let target;
+        if (type === "backdrop") {
+            const idx = nextBackdropIndex(dir);
+            const base = idx === 0 ? "hero" : `hero${idx + 1}`;
+            target = path.join(dir, `${base}.${ext}`);
+        } else {
+            for (const old of globSync(path.join(dir, `${baseName}.*`))) {
+                try { unlinkSync(old); } catch { }
+            }
+            target = path.join(dir, `${baseName}.${ext}`);
+        }
+        try {
+            writeFileSync(target, buf);
+        } catch (e) {
+            return problem(`Failed to write image: ${e?.message || e}`);
+        }
+
+        // keep meta.yaml in sync so the new image stays the "current" one
+        try {
+            const metaPath = path.join(dir, "meta.yaml");
+            if (existsSync(metaPath)) {
+                const { parse, stringify } = await import("yaml");
+                const doc = parse(readFileSync(metaPath, "utf-8")) || {};
+                const key = IMAGE_BASE_NAMES[type] || "poster";
+                const isPrimarySlot = type !== "backdrop" || path.basename(target, path.extname(target)) === "hero";
+                if (isPrimarySlot && doc[key] !== path.basename(target)) {
+                    doc[key] = path.basename(target);
+                    writeFileSync(metaPath, stringify(doc));
+                }
+            }
+        } catch (e) {
+            console.error(`[RemoteImages] Failed updating meta.yaml: ${e?.message || e}`);
+        }
+
+        console.log(`[RemoteImages] Downloaded ${type} -> ${target} (${buf.length} bytes)`);
+        res.status(204).end();
+    };
+    app.get("/Items/:itemId/RemoteImages/Download", downloadRemoteImage);
+    app.post("/Items/:itemId/RemoteImages/Download", downloadRemoteImage);
+
+    function imageFilesForType(dir, type, imageIndex) {
+        if (type === "Backdrop") {
+            if (imageIndex != null) {
+                const base = imageIndex === 0 ? "hero" : `hero${imageIndex + 1}`;
+                return globSync(path.join(dir, `${base}.*`)).filter(f => /\.(jpe?g|png|webp)$/i.test(f));
+            }
+            return globSync(path.join(dir, "hero*.*")).filter(f => /^hero\d*\.(jpe?g|png|webp)$/i.test(path.basename(f)));
+        }
+        const baseName = IMAGE_BASE_NAMES[type.toLowerCase()] || "poster";
+        return globSync(path.join(dir, `${baseName}.*`)).filter(f => /\.(jpe?g|png|webp)$/i.test(f));
+    }
+
+    async function syncMetaAfterDelete(dir, type) {
+        try {
+            const metaPath = path.join(dir, "meta.yaml");
+            if (!existsSync(metaPath)) return;
+            const { parse, stringify } = await import("yaml");
+            const doc = parse(readFileSync(metaPath, "utf-8")) || {};
+            const key = IMAGE_BASE_NAMES[type.toLowerCase()] || "poster";
+            const remaining = findImageInDir(dir, type);
+            if (remaining) doc[key] = path.basename(remaining.path);
+            else delete doc[key];
+            writeFileSync(metaPath, stringify(doc));
+        } catch (e) {
+            console.error(`[Images] Failed updating meta.yaml: ${e?.message || e}`);
+        }
+    }
+
+    const deleteItemImage = async (req, res) => {
+        const rawId = (req.params.itemId || "").replace(/-/g, "");
+        const type = imageTypeFromParam(req.params.imageType);
+        if (!type) return res.status(404).end();
+        if (!req.user || req.user.perms < 2) return res.status(403).end();
+        const dir = resolveItemDir(rawId);
+        if (!dir) return res.status(404).end();
+        const rawIndex = req.params.imageIndex != null ? req.params.imageIndex : req.query.imageIndex;
+        const imageIndex = rawIndex != null && rawIndex !== "" ? parseInt(rawIndex, 10) : null;
+        if (imageIndex != null && Number.isNaN(imageIndex)) return res.status(404).end();
+        const files = imageFilesForType(dir, type, imageIndex);
+        if (!files.length) return res.status(404).end();
+        for (const f of files) {
+            try { unlinkSync(f); } catch { }
+        }
+        await syncMetaAfterDelete(dir, type);
+        console.log(`[Images] Deleted ${type}${imageIndex != null ? `[${imageIndex}]` : ""} for ${req.params.itemId} (${files.length} file(s))`);
+        res.status(204).end();
+    };
+    app.delete("/Items/:itemId/Images/:imageType", deleteItemImage);
+    app.delete("/Items/:itemId/Images/:imageType/:imageIndex", deleteItemImage);
+
     app.get("/Items/:itemId/Images", (req, res) => {
         const rawId = (req.params.itemId || "").replace(/-/g, "");
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
@@ -705,24 +882,38 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         if (!filePath) return res.json([]);
 
-        const poster = findPosterPath(filePath);
-        if (!poster) return res.json([]);
-
+        // list all locally used images (poster/hero/logo/... ) for the item
+        let dir = filePath;
         try {
-            const stats = statSync(poster.path);
-            const dim = imageSize(poster.path);
-            res.json([{
-                ImageType: "Primary",
-                ImageIndex: 0,
-                ImageTag: poster.tag,
-                Path: poster.path,
-                Height: dim.height,
-                Width: dim.width,
-                Size: stats.size,
-            }]);
+            if (!statSync(filePath).isDirectory()) {
+                dir = filePath.substring(0, filePath.lastIndexOf("/"));
+            }
         } catch {
-            res.json([]);
+            dir = filePath.substring(0, filePath.lastIndexOf("/"));
         }
+        const parentDir = dir + "/..";
+        const out = [];
+        const seen = new Set();
+        for (const src of [dir, parentDir]) {
+            for (const img of findAllImagesInDir(src)) {
+                if (seen.has(img.path)) continue;
+                seen.add(img.path);
+                let dim = null;
+                try { dim = imageSize(readFileSync(img.path)); } catch { }
+                let size = null;
+                try { size = statSync(img.path).size; } catch { }
+                out.push({
+                    ImageType: img.type,
+                    ...(img.type === "Backdrop" ? { ImageIndex: img.index ?? 0 } : {}),
+                    ImageTag: img.tag,
+                    Path: img.path,
+                    Height: dim?.height || 0,
+                    Width: dim?.width || 0,
+                    Size: size || 0,
+                });
+            }
+        }
+        res.json(out);
     });
 
     app.get("/Items/:itemId/RemoteImages/Providers", (req, res) => {
@@ -732,16 +923,23 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         ]);
     });
 
-    app.get("/Items/:itemId/Images/Primary", async (req, res) => {
-        try { await serveItemImage(req, res, "Primary"); } catch (e) { if (server.DEBUG_GENEREL) console.log("[IMG-DBG] error:", e?.stack || e); res.status(404).end(); }
+    function imageTypeFromParam(p) {
+        if (!p) return null;
+        const m = { Primary: "Primary", Backdrop: "Backdrop", Logo: "Logo", Thumb: "Thumb", Banner: "Banner", Disc: "Disc", Art: "Art", Box: "Box" };
+        return m[p[0].toUpperCase() + p.slice(1)] || null;
+    }
+
+    app.get("/Items/:itemId/Images/:imageType/:index", async (req, res) => {
+        const type = imageTypeFromParam(req.params.imageType);
+        if (!type) return res.status(404).end();
+        const idx = parseInt(req.params.index, 10);
+        try { await serveItemImage(req, res, type, Number.isNaN(idx) ? null : idx); } catch (e) { if (server.DEBUG_GENEREL) console.log("[IMG-DBG] error:", e?.stack || e); res.status(404).end(); }
     });
 
-    app.get("/Items/:itemId/Images/Backdrop", async (req, res) => {
-        try { await serveItemImage(req, res, "Backdrop"); } catch { res.status(404).end(); }
-    });
-
-    app.get("/Items/:itemId/Images/Thumb", async (req, res) => {
-        try { await serveItemImage(req, res, "Thumb"); } catch { res.status(404).end(); }
+    app.get("/Items/:itemId/Images/:imageType", async (req, res) => {
+        const type = imageTypeFromParam(req.params.imageType);
+        if (!type) return res.status(404).end();
+        try { await serveItemImage(req, res, type); } catch (e) { if (server.DEBUG_GENEREL) console.log("[IMG-DBG] error:", e?.stack || e); res.status(404).end(); }
     });
 
     app.get("/Users/:userId/Items/:itemId/Images/Primary", async (req, res) => {
@@ -910,21 +1108,32 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         return null;
     }
 
-    async function serveItemImage(req, res, imageType) {
+    async function serveItemImage(req, res, imageType, imageIndex = null) {
         const rawId = (req.params.itemId || "").replace(/-/g, "");
         if (server.DEBUG_GENEREL) console.log("[IMG-DBG] serveItemImage", rawId, imageType, req.query.tag);
 
         // resolve library-level IDs to a random item from that library
-        const LIB_LOOKUP = {
-            [generateItemId("movies")]: "movie",
-            [generateItemId("tvshows")]: "shows",
-            [generateItemId("shows")]: "shows",
-            [generateItemId("music")]: "music",
+        const LIB_META = {
+            [generateItemId("movies")]: { key: "movies", name: "Movies" },
+            [generateItemId("tvshows")]: { key: "shows", name: "Shows" },
+            [generateItemId("shows")]: { key: "shows", name: "Shows" },
+            [generateItemId("music")]: { key: "music", name: "Music" },
         };
-        const libKey = LIB_LOOKUP[rawId];
-        if (libKey) {
+        const libMeta = LIB_META[rawId];
+        if (libMeta) {
+            // generated view image: random library backdrop at 50% brightness
+            // with the library name on it (DejaVu Sans Bold, size fits name).
+            // served for Primary AND Backdrop, cropped/resized to fill params.
+            const genBuf = await generateLibBackdrop(libMeta.name, libMeta.key);
+            if (genBuf) {
+                const outBuf = await renderLibBackdropForQuery(genBuf, req);
+                res.set("Content-Type", "image/png");
+                res.set("Cache-Control", "private, max-age=86400");
+                res.set("Content-Length", outBuf.length);
+                return res.send(outBuf);
+            }
             const index = globalThis.__mediaIndex || {};
-            const entries = index[libKey] || [];
+            const entries = index[libMeta.key] || [];
             if (entries.length > 0) {
                 var shuffled = [].concat(entries).sort(function () { return Math.random() - 0.5; });
                 for (var i = 0; i < shuffled.length && i < 20; i++) {
@@ -997,8 +1206,15 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
         const dir = filePath.substring(0, filePath.lastIndexOf("/"));
         const parentDir = dir + "/..";
-        const image = findImageInDir(dir, imageType) || findImageInDir(parentDir, imageType)
-            || findPosterPath(filePath);
+        let image = null;
+        if (imageType === "Backdrop" && imageIndex != null) {
+            image = imageIndex === 0
+                ? (findImageInDir(dir, imageType) || findImageInDir(parentDir, imageType))
+                : (findBackdropInDir(dir, imageIndex) || findBackdropInDir(parentDir, imageIndex));
+        } else {
+            image = findImageInDir(dir, imageType) || findImageInDir(parentDir, imageType)
+                || findPosterPath(filePath);
+        }
         if (!image) return res.status(404).end();
 
         try {
@@ -1727,45 +1943,17 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
 
-        function randomImageTag(entries, imageType) {
-            if (!entries || entries.length === 0) return null;
-            var shuffled = [].concat(entries).sort(function () { return Math.random() - 0.5; });
-            for (var i = 0; i < shuffled.length && i < 20; i++) {
-                var fp = shuffled[i].filePath || shuffled[i].showName;
-                if (!fp) continue;
-                var dir = fp.substring(0, fp.lastIndexOf("/"));
-                var img = findImageInDir(dir, imageType) || findImageInDir(dir + "/..", imageType) || findPosterPath(fp);
-                if (img) return img.tag;
-            }
-            return null;
+        function libBackdropTag(libKey, name) {
+            var src = pickBackdropPath(libKey, name);
+            return src ? backdropTagForLib(name, src) : null;
         }
 
-        function randomBackdropTag(entries) {
-            if (!entries || entries.length === 0) return null;
-            var shuffled = [].concat(entries).sort(function () { return Math.random() - 0.5; });
-            for (var i = 0; i < shuffled.length && i < 20; i++) {
-                var fp = shuffled[i].filePath || shuffled[i].showName;
-                if (!fp) continue;
-                var dir = fp.substring(0, fp.lastIndexOf("/"));
-                var parentDir = dir + "/..";
-                var img = findImageInDir(dir, "Backdrop") || findImageInDir(parentDir, "Backdrop");
-                if (img) return img.tag;
-            }
-            return null;
-        }
-
-        var showNames = [];
-        var seen = {};
-        for (var s = 0; s < (index.shows || []).length; s++) {
-            var sn = index.shows[s].showName;
-            if (sn && !seen[sn]) { seen[sn] = true; showNames.push(index.shows[s]); }
-        }
-
-        var movieTag = randomImageTag(index.movies, "Primary");
-        var movieBackdrop = randomBackdropTag(index.movies);
-        var showTag = randomImageTag(showNames, "Primary");
-        var showBackdrop = randomBackdropTag(showNames);
-        var musicTag = randomImageTag(index.music, "Primary");
+        var movieBackdrop = libBackdropTag("movies", "Movies");
+        var movieTag = movieBackdrop;
+        var showBackdrop = libBackdropTag("shows", "Shows");
+        var showTag = showBackdrop;
+        var musicBackdrop = libBackdropTag("music", "Music");
+        var musicTag = musicBackdrop;
 
         function makeUserView(name, collectionType, id, path, imgTag, bdTag) {
             var item = {
@@ -1791,7 +1979,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         var items = [
             makeUserView("Movies", "movies", LIB_IDS.movies, "media/movie", movieTag, movieBackdrop),
             makeUserView("Shows", "tvshows", LIB_IDS.tvshows, "media/shows", showTag, showBackdrop),
-            makeUserView("Music", "music", LIB_IDS.music, "media/music", musicTag, null),
+            makeUserView("Music", "music", LIB_IDS.music, "media/music", musicTag, musicBackdrop),
         ];
 
         const db = getDb();

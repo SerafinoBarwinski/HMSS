@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { getItemMeta } from "./meta_reader.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
@@ -7,6 +7,10 @@ const IMAGE_SEARCH = {
     Primary: [["poster", "crunchyroll_poster"], ["folder"]],
     Backdrop: [["hero", "crunchyroll_backdrop", "backdrop", "fanart"]],
     Logo: [["logo", "crunchyroll_logo"]],
+    Thumb: [["thumb", "landscape", "thumbnail"]],
+    Banner: [["banner"]],
+    Disc: [["disc"]],
+    Art: [["clearart", "art"]],
 };
 
 export function findImageInDir(dir, imageType) {
@@ -16,11 +20,53 @@ export function findImageInDir(dir, imageType) {
         for (const name of names) {
             for (const ext of [".jpg", ".png", ".webp"]) {
                 const fp = `${dir}/${name}${ext}`;
-                if (existsSync(fp)) return { path: fp, tag: generateItemId(fp) };
+                if (existsSync(fp)) {
+                    let sig = "";
+                    try {
+                        const st = statSync(fp);
+                        sig = `:${st.size}:${Math.floor(st.mtimeMs)}`;
+                    } catch {}
+                    return { path: fp, tag: generateItemId(fp + sig) };
+                }
             }
         }
     }
     return null;
+}
+
+export function findBackdropInDir(dir, index) {
+    if (!dir || index == null || index < 0) return null;
+    if (index === 0) return findImageInDir(dir, "Backdrop");
+    const base = `hero${index + 1}`;
+    for (const ext of [".jpg", ".png", ".webp"]) {
+        const fp = `${dir}/${base}${ext}`;
+        if (existsSync(fp)) {
+            let sig = "";
+            try {
+                const st = statSync(fp);
+                sig = `:${st.size}:${Math.floor(st.mtimeMs)}`;
+            } catch {}
+            return { path: fp, tag: generateItemId(fp + sig) };
+        }
+    }
+    return null;
+}
+
+export function findAllBackdropsInDir(dir) {
+    const out = [];
+    if (!dir) return out;
+    const seen = new Set();
+    let idx = 0;
+    while (true) {
+        const found = findBackdropInDir(dir, idx);
+        if (!found) break;
+        if (!seen.has(found.path)) {
+            seen.add(found.path);
+            out.push({ path: found.path, tag: found.tag, index: idx });
+        }
+        idx++;
+    }
+    return out;
 }
 
 export function findPosterPath(filePath) {
@@ -28,6 +74,27 @@ export function findPosterPath(filePath) {
     const dir = filePath.substring(0, filePath.lastIndexOf("/"));
     const parentDir = dir + "/..";
     return findImageInDir(dir, "Primary") || findImageInDir(parentDir, "Primary");
+}
+
+export function findAllImagesInDir(dir) {
+    const result = [];
+    if (!dir) return result;
+    const seen = new Set();
+    for (const type of ["Primary", "Backdrop", "Logo", "Thumb", "Banner", "Disc", "Art"]) {
+        if (type === "Backdrop") {
+            for (const found of findAllBackdropsInDir(dir)) {
+                if (seen.has(found.path)) continue;
+                seen.add(found.path);
+                result.push({ type, path: found.path, tag: found.tag, index: found.index });
+            }
+            continue;
+        }
+        const found = findImageInDir(dir, type);
+        if (!found || seen.has(found.path)) continue;
+        seen.add(found.path);
+        result.push({ type, path: found.path, tag: found.tag });
+    }
+    return result;
 }
 
 export function mapToJellyfinItem(item, type, serverId) {
@@ -69,20 +136,28 @@ export function mapToJellyfinItem(item, type, serverId) {
     const dir = item.filePath ? item.filePath.substring(0, item.filePath.lastIndexOf("/")) : null;
     const parentDir = dir ? dir + "/.." : null;
 
-    const backdrop = (dir && findImageInDir(dir, "Backdrop")) || (parentDir && findImageInDir(parentDir, "Backdrop"));
+    const backdropTags = [
+        ...(dir ? findAllBackdropsInDir(dir) : []),
+        ...(parentDir ? findAllBackdropsInDir(parentDir) : []),
+    ].filter((b, i, a) => a.findIndex(x => x.path === b.path) === i);
+    const backdrop = backdropTags[0] || null;
     const logo = (dir && findImageInDir(dir, "Logo")) || (parentDir && findImageInDir(parentDir, "Logo"));
 
     base.ImageTags = poster ? { Primary: poster.tag } : {};
     if (logo) base.ImageTags.Logo = logo.tag;
-    base.BackdropImageTags = backdrop ? [backdrop.tag] : [];
+    base.BackdropImageTags = backdropTags.map(b => b.tag);
     base.ImageBlurHashes = {};
     if (poster) base.ImageBlurHashes.Primary = {};
-    if (backdrop) base.ImageBlurHashes.Backdrop = {};
+    if (backdropTags.length) {
+        base.ImageBlurHashes.Backdrop = {};
+        for (const b of backdropTags) base.ImageBlurHashes.Backdrop[b.tag] = "";
+    }
     if (logo) base.ImageBlurHashes.Logo = {};
 
     if (isEpisode) {
         const showDir = `media/shows/${item.showName}`;
-        const showBackdrop = findImageInDir(showDir, "Backdrop");
+        const showBackdrops = findAllBackdropsInDir(showDir);
+        const showBackdrop = showBackdrops[0] || null;
         const showLogo = findImageInDir(showDir, "Logo");
         const showPoster = findImageInDir(showDir, "Primary");
 
@@ -94,7 +169,7 @@ export function mapToJellyfinItem(item, type, serverId) {
         base.SeasonName = `Season ${item.season}`;
         base.VideoType = "VideoFile";
         base.ParentBackdropItemId = showId;
-        base.ParentBackdropImageTags = showBackdrop ? [showBackdrop.tag] : [];
+        base.ParentBackdropImageTags = showBackdrops.map(b => b.tag);
         base.ParentLogoItemId = showId;
         base.ParentLogoImageTag = showLogo ? showLogo.tag : null;
         base.ParentThumbItemId = showId;
@@ -105,7 +180,7 @@ export function mapToJellyfinItem(item, type, serverId) {
         if (poster) base.ImageBlurHashes.Primary = {};
         if (showBackdrop) {
             base.ImageBlurHashes.Backdrop = {};
-            base.ImageBlurHashes.Backdrop[showBackdrop.tag] = "";
+            for (const b of showBackdrops) base.ImageBlurHashes.Backdrop[b.tag] = "";
         }
         if (showLogo) {
             base.ImageBlurHashes.Logo = {};
