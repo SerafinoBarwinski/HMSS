@@ -2945,7 +2945,9 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.delete('/Branding/Splashscreen', (req, res) => { /* DeleteCustomSplashscreen */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Branding/Splashscreen', async (req, res) => { /* GetSplashscreen */
         try {
-            const buf = await renderSplashscreen(globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] });
+            // ?t= acts as a seed: same t → same splash image, no t → random
+            const seed = req.query.t != null ? Number(req.query.t) : null;
+            const buf = await renderSplashscreen(globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] }, seed);
             res.set("Content-Type", "image/jpeg");
             res.set("Cache-Control", "private, max-age=3600");
             res.send(buf);
