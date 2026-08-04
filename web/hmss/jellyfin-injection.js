@@ -66,9 +66,20 @@ window.HMSS = {
 // Jellyfin web doesn't render its splash on the login page, so we inject it:
 // fill <div class="backgroundContainer withBackdrop"> with the generated
 // splash image, seeded with a random t so every login shows a fresh one.
+var jellyfinSplashFix = { wasApplied: false };
+
+function isLoginPage() {
+    return window.location.hash.indexOf("#/login") === 0;
+}
+
 function applyLoginSplash() {
     if (!jellyfinFixSplash) return;
-    if (window.location.hash.indexOf("#/login") !== 0) return;
+
+    if (!isLoginPage()) {
+        removeLoginSplash();
+        return;
+    }
+    if (jellyfinSplashFix.wasApplied) return;
     if (document.getElementById("hmssLoginSplashImg")) return;
 
     var container = document.querySelector(".backgroundContainer.withBackdrop");
@@ -82,6 +93,14 @@ function applyLoginSplash() {
     img.onload = function () { img.style.opacity = "1"; };
 
     container.appendChild(img);
+    jellyfinSplashFix.wasApplied = true;
+}
+
+function removeLoginSplash() {
+    if (!jellyfinSplashFix.wasApplied) return;
+    var img = document.getElementById("hmssLoginSplashImg");
+    if (img && img.parentNode) img.parentNode.removeChild(img);
+    jellyfinSplashFix.wasApplied = false;
 }
 
 var splashObserver = new MutationObserver(function () {
@@ -89,8 +108,6 @@ var splashObserver = new MutationObserver(function () {
 });
 splashObserver.observe(document.body, { childList: true, subtree: true });
 window.addEventListener("hashchange", function () {
-    var existing = document.getElementById("hmssLoginSplashImg");
-    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
     applyLoginSplash();
 });
 applyLoginSplash();
