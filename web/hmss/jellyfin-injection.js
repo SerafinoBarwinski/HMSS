@@ -3,6 +3,8 @@ const showCustomMenu = true;
 
 // is State
 var hasEruda = false;
+// enables the login-page splash background fix (Jellyfin web bug: splash is not rendered there)
+var jellyfinFixSplash = true;
 
 // --- Addon UI registry, filled from /api/addons/ui ---
 var _hmssRoutes = [];
@@ -59,6 +61,39 @@ window.HMSS = {
         }
     }
 };
+
+// --- Login splash background fix ---
+// Jellyfin web doesn't render its splash on the login page, so we inject it:
+// fill <div class="backgroundContainer withBackdrop"> with the generated
+// splash image, seeded with a random t so every login shows a fresh one.
+function applyLoginSplash() {
+    if (!jellyfinFixSplash) return;
+    if (window.location.hash.indexOf("#/login") !== 0) return;
+    if (document.getElementById("hmssLoginSplashImg")) return;
+
+    var container = document.querySelector(".backgroundContainer.withBackdrop");
+    if (!container) return;
+
+    var img = document.createElement("img");
+    img.id = "hmssLoginSplashImg";
+    img.src = "/Branding/Splashscreen?t=" + Math.floor(Math.random() * 1000000000);
+    img.alt = "";
+    img.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;opacity:0;filter:brightness(.5);transition:opacity .6s;";
+    img.onload = function () { img.style.opacity = "1"; };
+
+    container.appendChild(img);
+}
+
+var splashObserver = new MutationObserver(function () {
+    applyLoginSplash();
+});
+splashObserver.observe(document.body, { childList: true, subtree: true });
+window.addEventListener("hashchange", function () {
+    var existing = document.getElementById("hmssLoginSplashImg");
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    applyLoginSplash();
+});
+applyLoginSplash();
 
 function createFeaturesButton() {
     var btn = document.createElement("button");
