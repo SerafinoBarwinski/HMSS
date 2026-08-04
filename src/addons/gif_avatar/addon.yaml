@@ -1,0 +1,8 @@
+name: GIF Avatar
+version: "1.0"
+description: "GIF profile pictures from Giphy in the user profile page"
+capabilities:
+  - ui
+web:
+  scripts:
+    - scripts/gif_avatar.js

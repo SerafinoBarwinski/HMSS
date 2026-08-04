@@ -1,0 +1,16 @@
+{
+  "api_key": {
+    "type": "string",
+    "label": "Giphy API Key",
+    "description": "Get a free key at https://developers.giphy.com",
+    "default": "",
+    "required": false
+  },
+  "rating": {
+    "type": "string",
+    "label": "Giphy Content Rating",
+    "description": "g, pg, pg-13 or r",
+    "default": "g",
+    "required": false
+  }
+}

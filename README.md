@@ -92,6 +92,10 @@ migrated.
 
 HMSS features a built-in add-on system. See `src/addons` for available plugins.
 
+- **GIF Avatar** — pick an animated GIF profile picture from Giphy on your
+  profile page. Needs a free [Giphy API Key](https://developers.giphy.com)
+  configured in the addon settings.
+
 ## Media Setup
 
 Drop your files into the `media/` directory using this structure:
@@ -128,6 +132,7 @@ get in the way of everyday use.
 
 - **NFC**: NFC-based automation
 - **Telerising**: Automatic Telerising discovery as a tuner
+- **GIF Avatar**: Animated GIF profile pictures from Giphy
 
 ## What's Next
 
