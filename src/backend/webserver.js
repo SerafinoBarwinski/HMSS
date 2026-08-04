@@ -182,6 +182,7 @@ function parseM3U(content) {
 }
 
 let _epgCache = { programmes: [], ts: 0, providerId: "" };
+let _providerCache = { channels: [], ts: 0, providerId: "" };
 
 function _nextPk(buf, start) {
     for (var i = start; i < buf.length - 4; i++) {
@@ -322,13 +323,19 @@ async function _fetchFeed(url) {
 
 function _parseXmltvDate(str) {
     if (!str) return null;
-    var m = str.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{2})(\d{2})$/);
-    if (!m) return new Date(str).toISOString();
-    var offsetHours = parseInt(m[7]), offsetMins = parseInt(m[8]);
-    var sign = offsetHours < 0 ? "-" : "+";
-    var absH = Math.abs(offsetHours);
-    var tz = sign + String(absH).padStart(2, "0") + ":" + String(offsetMins).padStart(2, "0");
-    return m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":" + m[6] + tz;
+    var m = str.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\s*([+-]\d{2})(\d{2}))?$/);
+    if (m) {
+        var utcMs = Date.UTC(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]),
+            parseInt(m[4]), parseInt(m[5]), parseInt(m[6]));
+        if (m[7]) {
+            var sign = m[7].charAt(0) === "-" ? -1 : 1;
+            var offsetMin = parseInt(m[7].slice(1)) * 60 + parseInt(m[8]);
+            utcMs -= sign * offsetMin * 60000;
+        }
+        return new Date(utcMs).toISOString();
+    }
+    var d = new Date(str);
+    return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function _xmltvTicks(startStr, stopStr) {
@@ -337,6 +344,104 @@ function _xmltvTicks(startStr, stopStr) {
     var e = new Date(_parseXmltvDate(stopStr)).getTime();
     if (isNaN(s) || isNaN(e)) return 0;
     return (e - s) * 10000;
+}
+
+function _extractChannelsFallback(text) {
+    var channels = [];
+    var re = /<channel\s+id=(["'])([^"']*?)\1[\s\S]*?<\/channel\s*>/gi;
+    var dnRe = /<display-name[^>]*>([^<]*)<\//gi;
+    var match;
+    while ((match = re.exec(text)) !== null) {
+        var chId = match[2];
+        var dnMatch = dnRe.exec(match[0]);
+        dnRe.lastIndex = 0;
+        var name = dnMatch ? dnMatch[1].trim() : chId;
+        channels.push({ Name: name, Id: chId });
+    }
+    return channels;
+}
+
+async function _fetchProviderChannels(config, providerId) {
+    if (_providerCache.providerId === providerId && Date.now() - _providerCache.ts < 300000 && _providerCache.channels.length > 0) {
+        return _providerCache.channels;
+    }
+    var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
+    if (!provider || !provider.Path) return [];
+    try {
+        var raw = await _fetchFeed(provider.Path);
+        if (!raw) return [];
+        var text = raw.toString("utf-8");
+        text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
+        var firstLt = text.indexOf("<");
+        if (firstLt > 0) text = text.substring(firstLt);
+        text = text.replace(/<\?xml[\s\S]*?\?>/g, "").replace(/<!DOCTYPE[\s\S]*?>/g, "").trim();
+        if (text.charAt(0) !== "<") return [];
+        var channels = [];
+        try {
+            var { SaxesParser } = await import("saxes");
+            var parser = new SaxesParser({ lowercase: true });
+            var currentChannel = null;
+            parser.on("opentag", function (node) {
+                if (node.name === "channel") {
+                    currentChannel = { Id: node.attributes.id || "", Name: "" };
+                } else if (currentChannel && node.name === "display-name" && !currentChannel.Name) {
+                    currentChannel._capture = true;
+                }
+            });
+            parser.on("text", function (txt) {
+                if (currentChannel && currentChannel._capture) currentChannel.Name += txt;
+            });
+            parser.on("cdata", function (txt) {
+                if (currentChannel && currentChannel._capture) currentChannel.Name += txt;
+            });
+            parser.on("closetag", function (node) {
+                var n = node.name;
+                if (n === "display-name" && currentChannel) {
+                    currentChannel._capture = false;
+                    if (currentChannel.Name) currentChannel.Name = currentChannel.Name.trim();
+                } else if (n === "channel" && currentChannel) {
+                    if (!currentChannel.Name) currentChannel.Name = currentChannel.Id;
+                    channels.push(currentChannel);
+                    currentChannel = null;
+                }
+            });
+            parser.write(text).close();
+        } catch (e) {
+            console.error("saxes error, falling back to regex:", e.message);
+        }
+        if (channels.length === 0) channels = _extractChannelsFallback(text);
+        _providerCache = { channels, ts: Date.now(), providerId };
+        return channels;
+    } catch (e) {
+        console.error("XMLTV fetch error:", e);
+        return [];
+    }
+}
+
+async function _resolveTunerChannelId(config, provider, channelAttr, tunerChannels) {
+    if (!channelAttr) return null;
+    var chId = null;
+    (config.ChannelMappings || []).forEach(function (m) {
+        if (m.ProviderId === provider.Id && m.ProviderChannelId === channelAttr) chId = m.TunerChannelId;
+    });
+    if (chId) return chId;
+    var tunerByTvgId = {};
+    var tunerByName = {};
+    (tunerChannels || []).forEach(function (tc) {
+        if (tc.TvgId) tunerByTvgId[tc.TvgId] = tc.Id;
+        var nkey = String(tc.Name || "").toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
+        if (nkey && !tunerByName[nkey]) tunerByName[nkey] = tc.Id;
+    });
+    if (tunerByTvgId[channelAttr]) return tunerByTvgId[channelAttr];
+    try {
+        var providerChannels = await _fetchProviderChannels(config, provider.Id);
+        var pc = providerChannels.find(function (p) { return p.Id === channelAttr; });
+        if (pc && pc.Name) {
+            var pkey = String(pc.Name).toLowerCase().replace(/hd\b/gi, "").replace(/\s+/g, " ").trim();
+            if (tunerByName[pkey]) return tunerByName[pkey];
+        }
+    } catch (_) { }
+    return null;
 }
 
 async function _fetchEpgProgrammes(config, providerId) {
@@ -408,27 +513,17 @@ async function _fetchEpgProgrammes(config, providerId) {
 
 async function _queryEpg(config, provider, requestedIds, maxStart, minEnd, tunerChannels, serverId) {
     if (!provider) return [];
-    var xmltvToTuner = {};
-    (config.ChannelMappings || []).forEach(function (m) {
-        if (m.ProviderId === provider.Id && m.ProviderChannelId && m.TunerChannelId) {
-            xmltvToTuner[m.ProviderChannelId] = m.TunerChannelId;
-        }
-    });
     var programmes = await _fetchEpgProgrammes(config, provider.Id);
     var items = [], seen = {};
-    var tunerByTvgId = {}, tunerByChId = {};
-    if (Object.keys(xmltvToTuner).length === 0 && tunerChannels) {
+    var tunerByChId = {};
+    if (tunerChannels) {
         for (var ci = 0; ci < tunerChannels.length; ci++) {
-            if (tunerChannels[ci].TvgId) tunerByTvgId[tunerChannels[ci].TvgId] = tunerChannels[ci].Id;
+            tunerByChId[tunerChannels[ci].Id] = tunerChannels[ci];
         }
-    }
-    for (var ci = 0; ci < tunerChannels.length; ci++) {
-        tunerByChId[tunerChannels[ci].Id] = tunerChannels[ci];
     }
     for (var i = 0; i < programmes.length; i++) {
         var p = programmes[i];
-        var channelId = xmltvToTuner[p.channel];
-        if (!channelId) channelId = tunerByTvgId[p.channel];
+        var channelId = await _resolveTunerChannelId(config, provider, p.channel, tunerChannels);
         if (!channelId) continue;
         if (requestedIds.length > 0 && !requestedIds.includes(channelId)) continue;
         var startDate = _parseXmltvDate(p.start);
@@ -1090,15 +1185,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             if (p.icon) return p.icon;
             const tvChannels = await getLiveTvChannels(db);
             if (server.DEBUG_GENEREL) console.log("[PGM-DBG] channels=", tvChannels.length);
-            let chId = null;
-            (config.ChannelMappings || []).forEach(m => {
-                if (m.ProviderId === provider.Id && m.ProviderChannelId === p.channel) chId = m.TunerChannelId;
-            });
-            if (!chId) {
-                for (const c of tvChannels) {
-                    if (c.TvgId === p.channel) { chId = c.Id; break; }
-                }
-            }
+            const chId = await _resolveTunerChannelId(config, provider, p.channel, tvChannels);
             if (server.DEBUG_GENEREL) console.log("[PGM-DBG] chId=", chId);
             if (!chId) return null;
             const ch = tvChannels.find(c => c.Id === chId) || null;
@@ -2273,17 +2360,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         if (found && itemType === "Program") {
             var p = found;
             var tvChannels = await getLiveTvChannels(db);
-            var tunerByTvgId = {}, tunerByChId = {};
-            for (var ci = 0; ci < tvChannels.length; ci++) {
-                if (tvChannels[ci].TvgId) tunerByTvgId[tvChannels[ci].TvgId] = tvChannels[ci];
-                tunerByChId[tvChannels[ci].Id] = tvChannels[ci];
-            }
-            var chId = null;
-            (epgConfig.ChannelMappings || []).forEach(function (m) {
-                if (m.ProviderId === epgProvider.Id && m.ProviderChannelId === p.channel) chId = m.TunerChannelId;
-            });
-            if (!chId && tunerByTvgId[p.channel]) chId = tunerByTvgId[p.channel].Id;
-            var ch = chId ? tunerByChId[chId] : null;
+            var chId = await _resolveTunerChannelId(epgConfig, epgProvider, p.channel, tvChannels);
+            var ch = chId ? tvChannels.find(function (c) { return c.Id === chId; }) || null : null;
             var startDate = _parseXmltvDate(p.start);
             var endDate = _parseXmltvDate(p.stop);
             var pName = p.title || "Unknown";
@@ -3184,74 +3262,6 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         });
     });
 
-    function _extractChannelsFallback(text) {
-        var channels = [];
-        var re = /<channel\s+id=(["'])([^"']*?)\1[\s\S]*?<\/channel\s*>/gi;
-        var dnRe = /<display-name[^>]*>([^<]*)<\//gi;
-        var match;
-        while ((match = re.exec(text)) !== null) {
-            var chId = match[2];
-            var dnMatch = dnRe.exec(match[0]);
-            dnRe.lastIndex = 0;
-            var name = dnMatch ? dnMatch[1].trim() : chId;
-            channels.push({ Name: name, Id: chId });
-        }
-        return channels;
-    }
-
-    async function _fetchProviderChannels(config, providerId) {
-        var provider = config.ListingProviders.find(function (p) { return p.Id === providerId; });
-        if (!provider || !provider.Path) return [];
-        try {
-            var raw = await _fetchFeed(provider.Path);
-            if (!raw) return [];
-            var text = raw.toString("utf-8");
-            text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
-            var firstLt = text.indexOf("<");
-            if (firstLt > 0) text = text.substring(firstLt);
-            text = text.replace(/<\?xml[\s\S]*?\?>/g, "").replace(/<!DOCTYPE[\s\S]*?>/g, "").trim();
-            if (text.charAt(0) !== "<") return [];
-            var channels = [];
-            try {
-                var { SaxesParser } = await import("saxes");
-                var parser = new SaxesParser({ lowercase: true });
-                var currentChannel = null;
-                parser.on("opentag", function (node) {
-                    if (node.name === "channel") {
-                        currentChannel = { Id: node.attributes.id || "", Name: "" };
-                    } else if (currentChannel && node.name === "display-name" && !currentChannel.Name) {
-                        currentChannel._capture = true;
-                    }
-                });
-                parser.on("text", function (txt) {
-                    if (currentChannel && currentChannel._capture) currentChannel.Name += txt;
-                });
-                parser.on("cdata", function (txt) {
-                    if (currentChannel && currentChannel._capture) currentChannel.Name += txt;
-                });
-                parser.on("closetag", function (node) {
-                    var n = node.name;
-                    if (n === "display-name" && currentChannel) {
-                        currentChannel._capture = false;
-                        if (currentChannel.Name) currentChannel.Name = currentChannel.Name.trim();
-                    } else if (n === "channel" && currentChannel) {
-                        if (!currentChannel.Name) currentChannel.Name = currentChannel.Id;
-                        channels.push(currentChannel);
-                        currentChannel = null;
-                    }
-                });
-                parser.write(text).close();
-            } catch (e) {
-                console.error("saxes error, falling back to regex:", e.message);
-            }
-            if (channels.length === 0) channels = _extractChannelsFallback(text);
-            return channels;
-        } catch (e) {
-            console.error("XMLTV fetch error:", e);
-            return [];
-        }
-    }
-
     function _buildCountryNames() {
         var names = [];
         try {
@@ -3670,17 +3680,8 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         }
         if (!p) return res.status(404).json({ error: "Program not found." });
         var tvChannels = await getLiveTvChannels(db);
-        var tunerByTvgId = {}, tunerByChId = {};
-        for (var ci = 0; ci < tvChannels.length; ci++) {
-            if (tvChannels[ci].TvgId) tunerByTvgId[tvChannels[ci].TvgId] = tvChannels[ci];
-            tunerByChId[tvChannels[ci].Id] = tvChannels[ci];
-        }
-        var chId = null;
-        (config.ChannelMappings || []).forEach(function (m) {
-            if (m.ProviderId === provider.Id && m.ProviderChannelId === p.channel) chId = m.TunerChannelId;
-        });
-        if (!chId && tunerByTvgId[p.channel]) chId = tunerByTvgId[p.channel].Id;
-        var ch = chId ? tunerByChId[chId] : null;
+        var chId = await _resolveTunerChannelId(config, provider, p.channel, tvChannels);
+        var ch = chId ? tvChannels.find(function (c) { return c.Id === chId; }) || null : null;
         var startDate = _parseXmltvDate(p.start);
         var endDate = _parseXmltvDate(p.stop);
         var name = p.title || "Unknown";
