@@ -17,6 +17,7 @@ import * as addonLoader from "./src/backend/addon_loader.js"
 import { buildIndex } from "./src/backend/media_indexer.js"
 import { organizeShows, organizeMovies, organizeMusic } from "./src/backend/media_organizer.js"
 import { spamProtection } from "./src/backend/spam_protection.js"
+import { authMiddleware } from "./src/backend/auth.js"
 import { telerisingRoutes, startTelerisingIfAutostart } from "./src/backend/telerising.js"
 import { startDiscovery } from "./src/backend/discovery.js"
 import { WebSocketServer } from "ws";
@@ -194,6 +195,7 @@ const app = express()
 app.disable("x-powered-by");
 app.use(express.json());
 app.set('trust proxy', true);
+app.use(authMiddleware(() => db));
 app.use(spamProtection({ windowMs: 60000, maxRequests: 100 }));
 app.use((req, res, next) => {
     res.set("Server", "Kestrel");
