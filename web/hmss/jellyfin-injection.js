@@ -513,6 +513,8 @@ pageObserver.observe(document.body, {
 // --- Gamepad controller support (virtual cursor) ---
 // Left stick = cursor, A = enter/click, B = back, right stick = scroll.
 // Disabled while a game runs in the emulator (native gamepad support there).
+// Set to true to enable the virtual cursor.
+var HMSS_GAMEPAD_CURSOR = false;
 (function () {
     function isEmulatorActive() {
         var wrap = document.getElementById('emuFrameWrap');
@@ -572,6 +574,7 @@ pageObserver.observe(document.body, {
 
     function loop() {
         requestAnimationFrame(loop);
+        if (!HMSS_GAMEPAD_CURSOR) return;
         if (isEmulatorActive()) { setControllerMode(false); return; }
 
         var pads = [];
