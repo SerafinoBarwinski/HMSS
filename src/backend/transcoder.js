@@ -156,6 +156,16 @@ function startTranscode(sourceFile, probe, audioStreamIndex, startTimeSec) {
 
             proc.on("exit", (code) => {
                 if (!resolved) {
+                    const playlist = path.join(outputDir, "playlist.m3u8");
+                    const content = existsSync(playlist) ? readFileSync(playlist, "utf8") : "";
+                    const hasValidPlaylist = content.includes("#EXT-X-MEDIA-SEQUENCE") && content.includes(".ts");
+                    if (code === 0 && hasValidPlaylist) {
+                        resolved = true;
+                        session.finishedAt = Date.now();
+                        resolve(session);
+                        setTimeout(() => cleanupSession(sessionId), SESSION_TTL_MS);
+                        return;
+                    }
                     reject(new Error(`ffmpeg exited with code ${code}: ${stderrBuf.slice(-500)}`));
                     cleanupSession(sessionId);
                     return;

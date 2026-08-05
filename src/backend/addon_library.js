@@ -1,5 +1,6 @@
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { getAddonLibraries } from "./addon_loader.js";
 import { findImageInDir, addDashesToUuid } from "./jellyfin_items.js";
 
@@ -11,6 +12,24 @@ export const ADDON_FILE_TYPE = "Game";
 // (addon, library, relative path) without a lookup table.
 //   collection: { t: "c", a: <addonId>, l: <libName> }
 //   item:       { t: "i", a: <addonId>, l: <libName>, p: <relPath> }
+// Because the encoded form can exceed a UUID length (and clients like
+// Findroid parse BaseItemDto.Id as a UUID), every id exposed to clients is
+// aliased to a deterministic 32-char hex string. The map below resolves the
+// alias back to the encoded id for this process lifetime (aliases are
+// deterministic, so they stay valid across restarts).
+
+const encodedToAlias = new Map();
+const aliasToEncoded = new Map();
+
+export function aliasFor(encoded) {
+    let alias = encodedToAlias.get(encoded);
+    if (!alias) {
+        alias = createHash("md5").update(encoded).digest("hex");
+        encodedToAlias.set(encoded, alias);
+        aliasToEncoded.set(alias, encoded);
+    }
+    return alias;
+}
 
 export function encodeLibId(meta) {
     return Buffer.from(JSON.stringify(meta)).toString("hex");
@@ -18,6 +37,14 @@ export function encodeLibId(meta) {
 
 export function decodeLibId(id) {
     if (typeof id !== "string" || !id || !/^[0-9a-f]+$/i.test(id)) return null;
+    const encoded = aliasToEncoded.get(id.toLowerCase());
+    if (encoded) {
+        try {
+            return JSON.parse(Buffer.from(encoded, "hex").toString("utf8"));
+        } catch {
+            return null;
+        }
+    }
     try {
         const meta = JSON.parse(Buffer.from(id, "hex").toString("utf8"));
         if (meta && meta.t && meta.a && meta.l) return meta;
@@ -32,11 +59,11 @@ export function isAddonLibraryId(id) {
 }
 
 export function collectionIdFor(lib) {
-    return encodeLibId({ t: "c", a: lib.addon, l: lib.name });
+    return aliasFor(encodeLibId({ t: "c", a: lib.addon, l: lib.name }));
 }
 
 export function itemIdFor(lib, relPath) {
-    return encodeLibId({ t: "i", a: lib.addon, l: lib.name, p: relPath });
+    return aliasFor(encodeLibId({ t: "i", a: lib.addon, l: lib.name, p: relPath }));
 }
 
 export function findCollection(addonId, libName) {

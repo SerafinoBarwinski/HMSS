@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { getItemMeta } from "./meta_reader.js";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { parse } from "yaml";
 
 const IMAGE_SEARCH = {
@@ -15,11 +16,12 @@ const IMAGE_SEARCH = {
 
 export function findImageInDir(dir, imageType) {
     if (!dir) return null;
+    const base = path.normalize(dir);
     const candidates = IMAGE_SEARCH[imageType] || IMAGE_SEARCH.Primary;
     for (const names of candidates) {
         for (const name of names) {
             for (const ext of [".jpg", ".png", ".webp"]) {
-                const fp = `${dir}/${name}${ext}`;
+                const fp = `${base}/${name}${ext}`;
                 if (existsSync(fp)) {
                     let sig = "";
                     try {
@@ -37,9 +39,9 @@ export function findImageInDir(dir, imageType) {
 export function findBackdropInDir(dir, index) {
     if (!dir || index == null || index < 0) return null;
     if (index === 0) return findImageInDir(dir, "Backdrop");
-    const base = `hero${index + 1}`;
+    const base = path.normalize(dir);
     for (const ext of [".jpg", ".png", ".webp"]) {
-        const fp = `${dir}/${base}${ext}`;
+        const fp = `${base}/hero${index + 1}${ext}`;
         if (existsSync(fp)) {
             let sig = "";
             try {
@@ -260,6 +262,7 @@ export function filteredItemsFromIndex(index, serverId, { parentId, includeItemT
     const skip = parseInt(startIndex) || 0;
     const types = includeItemTypes ? (Array.isArray(includeItemTypes) ? includeItemTypes : [includeItemTypes]) : null;
     const items = [];
+    if (typeof parentId === "string") parentId = parentId.replace(/-/g, "");
 
     const addIf = (item, entryType, jellyfinType) => {
         if (types && !types.includes(jellyfinType)) return;
@@ -501,7 +504,14 @@ export function readMetaForDir(dir) {
     try {
         for (const f of ["meta.yaml", "meta.yml"]) {
             const fp = `${dir}/${f}`;
-            if (existsSync(fp)) return parse(readFileSync(fp, "utf-8"));
+            if (existsSync(fp)) {
+                const data = parse(readFileSync(fp, "utf-8"));
+                if (data) {
+                    if (data.year != null && data.year !== "") data.year = Number(data.year);
+                    if (data.community_rating != null && data.community_rating !== "") data.community_rating = Number(data.community_rating);
+                }
+                return data;
+            }
         }
     } catch {}
     return null;

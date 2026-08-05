@@ -81,6 +81,40 @@ export async function fetchArtwork({ tmdbId, type }) {
         }
     }
 
+    // clearart (distinct from the generic "logos" bucket above)
+    const clearart = [];
+    if (data[clearArtKey]) {
+        for (const img of data[clearArtKey]) {
+            clearart.push({ url: img.url, likes: img.likes, lang: img.lang, type: "Clearart" });
+        }
+    }
+
+    // clearlogo
+    const clearLogoKey = type === "show" ? "clearlogo" : "movielogo";
+    const clearlogos = [];
+    if (data[clearLogoKey]) {
+        for (const img of data[clearLogoKey]) {
+            clearlogos.push({ url: img.url, likes: img.likes, lang: img.lang, type: "ClearLogo" });
+        }
+    }
+
+    // logo (hdtvlogo / movielogo)
+    const tvLogoKey = type === "show" ? "hdtvlogo" : "movielogo";
+    const tvlogos = [];
+    if (data[tvLogoKey]) {
+        for (const img of data[tvLogoKey]) {
+            tvlogos.push({ url: img.url, likes: img.likes, lang: img.lang, type: "Logo" });
+        }
+    }
+
+    // characters (TV only)
+    const characters = [];
+    if (type === "show" && Array.isArray(data.characterart)) {
+        for (const img of data.characterart) {
+            characters.push({ url: img.url, likes: img.likes, lang: img.lang, type: "Character" });
+        }
+    }
+
     // banners
     const bannerKey = type === "show" ? "tvbanner" : "moviebanner";
     const banners = [];
@@ -108,7 +142,7 @@ export async function fetchArtwork({ tmdbId, type }) {
         }
     }
 
-    return { posters, backgrounds, logos, banners, discs, thumbs };
+    return { posters, backgrounds, logos, clearart, clearlogos, tvlogos, characters, banners, discs, thumbs };
 }
 
 export async function downloadBest({ tmdbId, type, targetDir }) {

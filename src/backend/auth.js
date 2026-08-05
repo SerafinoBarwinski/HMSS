@@ -321,7 +321,7 @@ export function hmssAuthRoutes(app, getDb) {
         return {
             Name: u.Username,
             ServerId: serverId || "hmss-local",
-            Id: u.Id.replace(/-/g, ""),
+            Id: u.Id,
             HasPassword: Boolean(u.Password),
             HasConfiguredPassword: Boolean(u.Password),
             HasConfiguredEasyPassword: false,

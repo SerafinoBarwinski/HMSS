@@ -75,18 +75,20 @@ migrated.
 ## Override Arguments
 
 #### Common
-- `--debug`: Enables verbose logging
 - `--port`: Changes the web server port
 - `--migrate=<path>`: Imports users, devices and their permissions from an
   existing Jellyfin database into HMSS. See [Migrating from Jellyfin](#migrating-from-jellyfin).
+  Only needs one succesfull startup, then Arg can be removed.
+- `--debug`: Some useful trubleshooting Infos
 
 #### Development
 - `--fail-integrity-check`: Forces the integrity check to fail, even if all
   conditions are met. Useful for debugging the integrity check itself.
-- `--skip-integrity-check`: Skips the integrity check. **Can lead to
-  unpredictable errors!**
-- `--i-am-a-tea-pot`: No coffee today
+- `--skip-integrity-check`: Skips the integrity check. **Can lead to unpredictable errors!**
 - `--crash-on-startup`: Intentionally crash the Server on Startup
+- `--verbose-debug`: Enables Verbose Logging: More Details then regular debuging.
+
+- `--i-am-a-tea-pot`: _The use case should be obvious_
 
 ## Addons
 

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not Found</title>
+<style>
+    #hmss404 {
+        position: relative;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        background: #0d0d13;
+        color: #fff;
+        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        box-sizing: border-box;
+    }
+    /* Image is shown at its natural size, never scaled up (no blur). */
+    #hmss404Img {
+        position: absolute;
+        left: 0; right: 0; top: 0; bottom: 0;
+        margin: auto;
+        z-index: 0;
+        max-width: none;
+        max-height: none;
+        opacity: 0;
+        transition: opacity 0.6s;
+        pointer-events: none;
+    }
+    /* Large enough to be a backdrop: centered at natural size, dimmed. */
+    #hmss404Img.large {
+        filter: brightness(0.32);
+    }
+    /* Too small for a backdrop: shown over the page instead, as a showcase.
+       Moved up so it doesn't sit behind the text. */
+    #hmss404Img.small {
+        top: 3vh;
+        bottom: auto;
+        left: 50%;
+        right: auto;
+        margin: 0;
+        transform: translateX(-50%);
+        filter: drop-shadow(0 16px 48px rgba(0, 0, 0, 0.65));
+    }
+    #hmss404Content {
+        position: relative;
+        z-index: 1;
+        text-align: center;
+        padding: 32px;
+        max-width: 640px;
+    }
+    #hmss404Content h1 {
+        font-size: 96px;
+        margin: 0 0 8px;
+        line-height: 1;
+        letter-spacing: 4px;
+    }
+    #hmss404Content p {
+        margin: 0 0 24px;
+        color: rgba(255, 255, 255, 0.75);
+    }
+    #hmss404Credit {
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.45);
+        margin-top: 8px;
+    }
+    #hmss404Content a {
+        display: inline-block;
+        color: #fff;
+        text-decoration: none;
+        border: 1px solid rgba(255, 255, 255, 0.4);
+        border-radius: 24px;
+        padding: 10px 28px;
+    }
+    #hmss404Content a:hover {
+        background: rgba(255, 255, 255, 0.15);
+    }
+</style>
+</head>
+<body>
+    <div id="hmss404">
+        <img id="hmss404Img" alt="">
+        <div id="hmss404Content">
+            <h1>404</h1>
+            <p id="hmss404Sub">Page not found</p>
+            <a id="hmss404Home" href="#/home">Go Home</a>
+            <p id="hmss404Credit"></p>
+        </div>
+    </div>
+    <script>
+        // An image whose smaller side is at least this large is used as a
+        // (natural-size) backdrop; anything smaller is shown over the page.
+        var SMALL_IMG_MIN = 800;
+
+        if (window.HMSS) {
+            var i18nWait = window.HMSS.i18nReady || Promise.resolve();
+            i18nWait.then(function () {
+                document.getElementById("hmss404Sub").textContent = window.HMSS.t("HeaderPageNotFound", "Page not found");
+                document.getElementById("hmss404Home").textContent = window.HMSS.t("GoHome", "Go Home");
+            });
+        }
+        (async function () {
+            var img = document.getElementById("hmss404Img");
+            var credit = document.getElementById("hmss404Credit");
+            img.onload = function () {
+                var min = Math.min(img.naturalWidth || 0, img.naturalHeight || 0);
+                img.classList.add(min >= SMALL_IMG_MIN ? "large" : "small");
+                img.style.opacity = "1";
+            };
+            try {
+                var token = (window.ApiClient && window.ApiClient.accessToken) ? window.ApiClient.accessToken() : "";
+                var resp = await fetch("/api/hmss/RandShowImg?types=Character", {
+                    headers: { "X-Emby-Authorization": 'MediaBrowser Token="' + token + '"' }
+                });
+                if (resp.ok) {
+                    var data = await resp.json();
+                    if (data.url) img.src = data.url;
+                    credit.textContent = (data.title ? data.title + " " : "") + (data.type ? "\u00b7 " + data.type : "");
+                }
+            } catch (e) { }
+        })();
+    </script>
+</body>
+</html>

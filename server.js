@@ -66,6 +66,7 @@ var JPI_Version = "10.11.11" //Jellyfin API Version
 var DEBUG_GENEREL = false
 var DEBUG_LOG_EVERY_REQUEST = false
 var DEBUG_LOG_EVERY_WEBSCKT = false;
+var DEBUG_VERBOSE_REQUEST_LOGGING = false;
 var DEBUG_fail_integrity_check = false;
 var DEBUG_skip_integrity_check = false;
 var DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = false;
@@ -122,6 +123,13 @@ for (const arg of args) {
             break;
         case "--crash-on-startup":
             DEBUG_CRASH_ON_STARTUP = true;
+            break;
+        case "--verbose-debug":
+            DEBUG_LOG_EVERY_REQUEST = true;
+            DEBUG_LOG_EVERY_WEBSCKT = true;
+            DEBUG_GENEREL = true;
+            DEBUG_ACCEPT_CLIENT_REMOTE_DEBUG = true;
+            DEBUG_VERBOSE_REQUEST_LOGGING = true;
             break;
         default:
             if (arg.startsWith("--migrate=")) {
@@ -201,10 +209,30 @@ app.use((req, res, next) => {
     res.set("Server", "Kestrel");
     next();
 });
+let milkStopped = false;
 app.use((req, res, next) => {
 
     // Very important!
     if (DEBUG_TEA_POT) {
+        app.use((req, res, next) => {
+            switch (req.method) {
+                case "BREW":
+                    return res.status(418).send("I'm a teapot. I refuse to brew coffee.");
+
+                case "WHEN":
+                    milkStopped = true
+                    return res.send("Stopping milk.");
+                case "PROPFIND":
+                    return res.status(207).json({
+                        type: "TeaPot",
+                        temperature: "75°C",
+                        strength: "medium",
+                        milk: milkStopped
+                    });
+                default:
+                    next();
+            }
+        });
         switch (req.get("Content-Type")) {
             case "application/json":
                 res.status(418).json({ error: "☕️ I'm a teapot" });
@@ -243,15 +271,27 @@ app.use((req, res, next) => {
 if (DEBUG_LOG_EVERY_REQUEST) {
     app.use((req, res, next) => {
         const start = Date.now();
-        if (!req.originalUrl.includes("/web")) {
-            res.on("finish", () => {
-                console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - start}ms)`);
-                // to debug for specific clients:
-                if (req.originalUrl === "/" || req.originalUrl === "/web/index.html") {
-                    console.log("  User-Agent:", req.headers["user-agent"]?.substring(0, 80));
-                    console.log("  Accept:", req.headers["accept"]?.substring(0, 80));
-                }
-            });
+        if (DEBUG_VERBOSE_REQUEST_LOGGING) {
+            console.log(`[REQ] ${req.method} ${req.originalUrl} --- headers: ${JSON.stringify(req.headers)} body: ${JSON.stringify(req.body)}`);
+        } else {
+            if (!req.originalUrl.includes("/web")) {
+                const _json = res.json.bind(res);
+                res.json = (body) => {
+                    if (body && typeof body === "object" && Array.isArray(body.Items)) {
+                        const keys = Object.keys(body);
+                        console.log(`[RESP] ${req.method} ${req.originalUrl} --- keys: ${keys.join(",")}${!keys.includes("StartIndex") ? "  MISSING StartIndex!" : ""} Items=${body.Items.length} Total=${body.TotalRecordCount} Start=${body.StartIndex}`);
+                    }
+                    return _json(body);
+                };
+                res.on("finish", () => {
+                    console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - start}ms)`);
+                    // to debug for specific clients:
+                    if (req.originalUrl === "/" || req.originalUrl === "/web/index.html") {
+                        console.log("  User-Agent:", req.headers["user-agent"]?.substring(0, 80));
+                        console.log("  Accept:", req.headers["accept"]?.substring(0, 80));
+                    }
+                });
+            }
         }
         next();
     });

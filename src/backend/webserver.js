@@ -4,6 +4,7 @@ import { authMiddleware, hmssAuthRoutes, hashLogoPath, resolveUser } from "./aut
 import * as sql from "./sql.js";
 import { getSystemInfo, getUserData, setUserData, getResumableItems, getPlayedItems, getAddonRow, getAllAddonRows, setAddonConfig, setAddonEnabled, getUserById, getUserByName, getUserCount, addUser, removeUser, editUser, getUserPolicy, setUserPolicy, getUserConfiguration, setUserConfiguration, getUserImage } from "./sql.js";
 import { suggestionsFromIndex, filteredItemsFromIndex, findPosterPath, findImageInDir, findBackdropInDir, findAllImagesInDir, findAllBackdropsInDir, readMetaForDir, mapToJellyfinItem, makeShowFolder, makeSeasonFolder, addDashesToUuid } from "./jellyfin_items.js";
+import { getBlurHash } from "./blur_hash.js";
 import { probeMedia, generateItemId } from "./media_probe.js";
 import { ADDON_COLLECTION_TYPE, browseAddonLibrary, collectionIdFor, getAddonCollections, getAddonLibraryItem, isAddonLibraryId, makeCollectionItem, resolveLibraryImage } from "./addon_library.js";
 import { getItemMeta } from "./meta_reader.js";
@@ -105,16 +106,27 @@ async function getLiveTvChannels(db) {
                     LocationType: "Remote",
                     MediaType: "Video",
                     MediaSources: [{
-                        Protocol: "Stream",
+                        Protocol: "Http",
                         Id: ch.id,
                         Name: ch.name,
                         Path: ch.url,
                         Type: "Default",
                         Container: "hls",
                         IsRemote: true,
+                        ReadAtNativeFramerate: true,
+                        IgnoreDts: true,
+                        IgnoreIndex: false,
+                        GenPtsInput: false,
+                        IsInfiniteStream: true,
+                        RequiresOpening: true,
+                        RequiresClosing: true,
+                        RequiresLooping: false,
+                        SupportsProbing: true,
+                        TranscodingSubProtocol: "http",
                         SupportsDirectPlay: true,
                         SupportsDirectStream: true,
                         SupportsTranscoding: false,
+                        HasSegments: false,
                     }],
                     ImageTags: ch.logo ? { Primary: ch.id } : {},
                     LogoUrl: ch.logo || "",
@@ -123,7 +135,7 @@ async function getLiveTvChannels(db) {
                     GenreItems: [],
                     Genres: [ch.group],
                     Tags: [],
-                    UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false },
+                    UserData: { PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played: false, Key: ch.id, ItemId: ch.id },
                 });
             }
         } catch { }
@@ -580,12 +592,57 @@ function proxyLiveTvLogo(res, logoUrl) {
 }
 function resolveParentId(pid) {
     if (!pid) return null;
+    if (typeof pid === "string") pid = pid.replace(/-/g, "");
     if (pid === "movies" || pid === generateItemId("movies")) return "movies";
     if (pid === "tvshows" || pid === "shows" || pid === generateItemId("tvshows")) return "tvshows";
     if (pid === "music" || pid === generateItemId("music")) return "music";
     if (pid === "unsorted" || pid === generateItemId("unsorted")) return "unsorted";
     if (pid === "livetv" || pid === generateItemId("livetv")) return "livetv";
     return pid;
+}
+
+export function buildMediaSource(found, itemPath, id, probe, itemType, disableDirectPlay = false, audioStreamIndex, appendAudioToTranscodeUrl = false) {
+    if (!probe) return null;
+    const isVideo = itemType === "Episode" || itemType === "Movie" || itemType === "Video";
+    var transcodeUrl = `/Videos/${id}/hls/master.m3u8`;
+    if (appendAudioToTranscodeUrl && audioStreamIndex != null) transcodeUrl += "?AudioStreamIndex=" + audioStreamIndex;
+    var defaultAudioIdx = audioStreamIndex != null ? audioStreamIndex : (probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null);
+    return {
+        Protocol: "File",
+        Id: id,
+        Path: itemPath,
+        Type: "Default",
+        Container: probe.container,
+        Size: probe.size,
+        Name: found.title || "Unknown",
+        SortName: (found.title || "unknown").toLowerCase(),
+        IsRemote: false,
+        RunTimeTicks: Math.round(probe.duration * 10000000),
+        ReadAtNativeFramerate: false,
+        IgnoreDts: false,
+        IgnoreIndex: false,
+        GenPtsInput: false,
+        SupportsTranscoding: true,
+        SupportsDirectStream: !disableDirectPlay,
+        SupportsDirectPlay: !disableDirectPlay,
+        IsInfiniteStream: false,
+        RequiresOpening: false,
+        RequiresClosing: false,
+        RequiresLooping: false,
+        SupportsProbing: true,
+        DirectPlayUrl: disableDirectPlay ? null : `/Videos/${id}/stream?static=true&api_key=`,
+        DirectStreamUrl: disableDirectPlay ? null : `/Videos/${id}/stream`,
+        TranscodingUrl: transcodeUrl,
+        TranscodingSubProtocol: "http",
+        HlsUrl: transcodeUrl,
+        VideoType: isVideo ? "VideoFile" : undefined,
+        MediaStreams: probe.streams,
+        Bitrate: probe.bitrate,
+        DefaultAudioStreamIndex: defaultAudioIdx,
+        HasSegments: false,
+        ETag: id,
+        PlaySessionId: crypto.randomUUID(),
+    };
 }
 
 export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
@@ -745,6 +802,85 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
 
         const filtered = images.filter(i => i.Type === imageType);
         res.json({ Images: filtered, TotalRecordCount: filtered.length, Providers: ["TheMovieDb", "Fanart"] });
+    });
+
+    // Random artwork (Logo / Clearart / ClearLogo / Character) fetched from the
+    // fanart.tv artwork provider for a random library item. Serves as the
+    // background artwork of the HMSS 404 page.
+    app.get("/api/hmss/RandShowImg", async (req, res) => {
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const providers = getAddonsByCapability("artwork");
+        const art = providers[0]?.module;
+        if (!art?.fetchArtwork) {
+            return res.status(503).json({ error: "No artwork provider available" });
+        }
+
+        const VALID_TYPES = ["Logo", "Clearart", "ClearLogo", "Character"];
+        const TYPE_FIELD = { Logo: "tvlogos", Clearart: "clearart", ClearLogo: "clearlogos", Character: "characters" };
+
+        const wanted = new Set();
+        if (req.query.types != null) {
+            const raw = Array.isArray(req.query.types) ? req.query.types : [req.query.types];
+            for (const v of raw) {
+                for (const part of String(v).split(",")) {
+                    const norm = VALID_TYPES.find(t => t.toLowerCase() === String(part).trim().toLowerCase());
+                    if (norm) wanted.add(norm);
+                }
+            }
+        }
+        if (wanted.size === 0) VALID_TYPES.forEach(t => wanted.add(t));
+
+        const onlyCharacters = wanted.size === 1 && wanted.has("Character");
+
+        const items = [];
+        for (const s of index.shows || []) {
+            const meta = readMetaForDir(`media/shows/${s.showName}`);
+            if (meta?.tmdb_id) items.push({ tmdbId: meta.tmdb_id, type: "show", title: meta?.enriched_name || meta?.name || s.showName || s.title || "Unknown" });
+        }
+        if (!onlyCharacters) {
+            for (const m of index.movies || []) {
+                const dir = m.filePath ? m.filePath.substring(0, m.filePath.lastIndexOf("/")) : null;
+                const meta = dir ? readMetaForDir(dir) : null;
+                if (meta?.tmdb_id) {
+                    const cleanTitle = dir ? path.basename(dir) : String(m.title || "Unknown").replace(/\.[^.]+$/, "");
+                    items.push({ tmdbId: meta.tmdb_id, type: "movie", title: meta?.enriched_name || meta?.name || cleanTitle });
+                }
+            }
+        }
+        if (items.length === 0) {
+            return res.status(404).json({ error: "No media with tmdb_id found" });
+        }
+
+        for (let attempt = 0; attempt < Math.min(items.length, 12); attempt++) {
+            const item = items[Math.floor(Math.random() * items.length)];
+            try {
+                const artwork = await art.fetchArtwork({ tmdbId: item.tmdbId, type: item.type });
+                const candidates = [];
+                for (const t of wanted) {
+                    const field = TYPE_FIELD[t];
+                    if (artwork[field]) candidates.push(...artwork[field]);
+                }
+                if (candidates.length > 0) {
+                    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+                    return res.json({ url: pick.url, title: item.title, type: pick.type || "Logo", itemType: item.type });
+                }
+            } catch (e) {
+                console.error(`[RandShowImg] fetchArtwork failed (tmdbId=${item.tmdbId}): ${e?.message || e}`);
+            }
+        }
+        res.status(404).json({ error: "No fanart artwork found" });
+    });
+
+    // Available Jellyfin web translation files (web/{lang}-json.{hash}.chunk.js),
+    // consumed by the HMSS i18n helper to reuse Jellyfin's translations.
+    app.get("/api/hmss/translations", (req, res) => {
+        const webDir = path.join(__dirname, "../../web");
+        let files = [];
+        try { files = readdirSync(webDir); } catch { }
+        const list = files
+            .filter(f => /^[A-Za-z0-9_-]+-json\.[a-f0-9]+\.chunk\.js$/.test(f))
+            .map(f => ({ lang: f.replace(/-json\..*$/, "").toLowerCase(), url: "/web/" + f }));
+        res.json(list);
     });
 
     function makeImageEntry(provider, url, type, likes, lang) {
@@ -1304,6 +1440,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         }
         if (!image) return res.status(404).end();
 
+        if (req.query.tag && req.query.tag !== image.tag) return res.status(404).end();
+
         try {
             const s = statSync(image.path);
             const ext = image.path.split(".").pop();
@@ -1667,7 +1805,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const serverId = sys?.id || "hmss-local";
         const userId = req.user.id;
         const limit = parseInt(req.query.Limit || req.query.limit) || 12;
-        const mediaTypes = (req.query.MediaTypes || req.query.mediaTypes || "Video").split(",").map(t => t.trim());
+        const mediaTypesRaw = req.query.MediaTypes ?? req.query.mediaTypes ?? "Video";
+        const mediaTypes = (Array.isArray(mediaTypesRaw) ? mediaTypesRaw : String(mediaTypesRaw).split(",")).map(t => String(t).trim());
 
         var indexKeys = [];
         var typeFilters = [];
@@ -1731,7 +1870,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             limit: req.query.limit || req.query.Limit || 16,
             startIndex: req.query.startIndex || req.query.StartIndex,
         });
-        res.json(result);
+        res.json(result.Items);
     });
 
     app.get("/Users/:userId/Items/:collectionType", async (req, res) => {
@@ -2006,7 +2145,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             Name: u.Username,
             ServerId: "hmss-local",
             ServerName: "HMSS",
-            Id: u.Id.replace(/-/g, ""),
+            Id: u.Id,
             PrimaryImageTag: logoPath ? hashLogoPath(logoPath) : null,
             EnableAutoLogin: false,
             LastLoginDate: u.LastLoginDate || new Date().toISOString(),
@@ -2077,7 +2216,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         for (const lib of getAddonCollections()) {
             items.push(makeUserView(lib.name.charAt(0).toUpperCase() + lib.name.slice(1), ADDON_COLLECTION_TYPE, collectionIdFor(lib), lib.path, null, null));
         }
-        res.json({ Items: items, TotalRecordCount: items.length });
+        res.json({ Items: items, TotalRecordCount: items.length, StartIndex: 0 });
     });
 
     app.get("/DisplayPreferences/:id", (req, res) => {
@@ -2260,7 +2399,8 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
                 }
                 if (item) items.push(item);
             }
-            const filters = (req.query.Filters || "").split(",");
+            const filtersRaw = req.query.Filters ?? "";
+            const filters = (Array.isArray(filtersRaw) ? filtersRaw : String(filtersRaw).split(",")).map(String);
             const filtered = filters.includes("IsNotFolder") ? items.filter(i => !i.IsFolder) : items;
             return res.json({ Items: filtered, TotalRecordCount: filtered.length, StartIndex: 0 });
         }
@@ -2277,6 +2417,23 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             startIndex: req.query.startIndex || req.query.StartIndex,
         });
         res.json(result);
+    });
+
+    app.get("/Items/Latest", async (req, res) => {
+        const rawParentId = req.query.parentId || req.query.ParentId;
+        const parentId = resolveParentId(rawParentId);
+        const sys = getSystemInfo(getDb());
+        const serverId = sys?.id || "hmss-local";
+        const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [] };
+        const addonBrowse = await browseAddonLibrary(serverId, parentId);
+        if (addonBrowse) return res.json(addonBrowse.Items || []);
+        const result = filteredItemsFromIndex(index, serverId, {
+            parentId,
+            includeItemTypes: req.query.includeItemTypes || req.query.IncludeItemTypes,
+            limit: req.query.limit || req.query.Limit || 16,
+            startIndex: req.query.startIndex || req.query.StartIndex,
+        });
+        res.json(result.Items);
     });
 
     app.get("/Items/:itemId", async (req, res) => {
@@ -2496,50 +2653,37 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
         const isMovie = itemType === "Movie";
         const isEpisode = itemType === "Episode";
 
-        const isVideoItem = isMovie || isEpisode || itemType === "Video";
-        const mediaSource = probe ? {
-            Protocol: "File",
-            Id: id,
-            Path: itemPath,
-            Type: "Default",
-            Container: probe.container,
-            Size: probe.size,
-            Name: found.title || "Unknown",
-            SortName: (found.title || "unknown").toLowerCase(),
-            IsRemote: false,
-            RunTimeTicks: Math.round(probe.duration * 10000000),
-            SupportsTranscoding: true,
-            SupportsDirectStream: true,
-            SupportsDirectPlay: true,
-            DirectPlayUrl: `/Videos/${id}/stream?static=true&api_key=`,
-            DirectStreamUrl: `/Videos/${id}/stream`,
-            TranscodingUrl: `/Videos/${id}/hls/master.m3u8`,
-            HlsUrl: `/Videos/${id}/hls/master.m3u8`,
-            VideoType: isVideoItem ? "VideoFile" : undefined,
-            MediaStreams: probe.streams,
-            Bitrate: probe.bitrate,
-            DefaultAudioStreamIndex: probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null,
-            HasSegments: false,
-            ETag: id,
-            PlaySessionId: crypto.randomUUID(),
-        } : null;
+        const mediaSource = probe ? buildMediaSource(found, itemPath, id, probe, itemType) : null;
 
         const poster = findPosterPath(itemPath);
         const meta = getItemMeta(itemPath);
 
-        let imageTags = poster ? { Primary: poster.tag } : {};
-        let backdropImageTags = [];
-        let logoTag = null;
+        const dir = itemPath ? itemPath.substring(0, itemPath.lastIndexOf("/")) : null;
+        const parentDir = dir ? dir + "/.." : null;
+        const backdropTags = [
+            ...(dir ? findAllBackdropsInDir(dir) : []),
+            ...(parentDir ? findAllBackdropsInDir(parentDir) : []),
+        ].filter((b, i, a) => a.findIndex(x => x.path === b.path) === i);
+        const logo = (dir && findImageInDir(dir, "Logo")) || (parentDir && findImageInDir(parentDir, "Logo"));
+        const thumb = (dir && findImageInDir(dir, "Thumb")) || (parentDir && findImageInDir(parentDir, "Thumb"));
 
-        if (itemType === "Series") {
-            const showDir = `media/shows/${found.showName}`;
-            const primaryImg = findImageInDir(showDir, "Primary");
-            if (primaryImg) imageTags = { Primary: primaryImg.tag };
-            const backdropImg = findImageInDir(showDir, "Backdrop");
-            if (backdropImg) backdropImageTags = [backdropImg.tag];
-            const logoImg = findImageInDir(showDir, "Logo");
-            if (logoImg) { logoTag = logoImg.tag; imageTags.Logo = logoTag; }
-        }
+        const imageTags = poster ? { Primary: poster.tag } : {};
+        if (logo) imageTags.Logo = logo.tag;
+        if (thumb) imageTags.Thumb = thumb.tag;
+        const backdropImageTags = backdropTags.map(b => b.tag);
+
+        const blurImages = [];
+        if (poster) blurImages.push(["Primary", poster.tag, poster.path]);
+        if (logo) blurImages.push(["Logo", logo.tag, logo.path]);
+        if (thumb) blurImages.push(["Thumb", thumb.tag, thumb.path]);
+        for (const b of backdropTags) blurImages.push(["Backdrop", b.tag, b.path]);
+        const blurHashes = {};
+        await Promise.all(blurImages.map(async ([blurType, tag, path]) => {
+            const hash = await getBlurHash(path);
+            if (!hash) return;
+            blurHashes[blurType] = blurHashes[blurType] || {};
+            blurHashes[blurType][tag] = hash;
+        }));
 
         const resp = {
             Name: meta?.name || found.title || "Unknown",
@@ -2571,7 +2715,7 @@ export async function hmssRoutes(app, getDb, apiVersion, port, mediaDirs = {}) {
             },
             ImageTags: imageTags,
             BackdropImageTags: backdropImageTags,
-            ImageBlurHashes: poster ? { Primary: {} } : {},
+            ImageBlurHashes: blurHashes,
             LocationType: "FileSystem",
             MediaType: (isMovie || isEpisode || itemType === "Video") ? "Video" : "Audio",
             VideoType: (isMovie || isEpisode || itemType === "Video") ? "VideoFile" : undefined,
@@ -3018,7 +3162,6 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
     app.get('/Albums/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.get('/Artists/:itemId/Similar', (req, res) => { res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 }); });
     app.delete('/Items', (req, res) => { /* DeleteItems */ res.status(200).json({ message: 'Not implemented' }); });
-    app.get('/Items/Latest', (req, res) => { /* GetLatestMedia */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/Root', (req, res) => { /* GetRootFolder */ res.status(200).json({ message: 'Not implemented' }); });
     app.delete('/Items/:itemId', (req, res) => { /* DeleteItem */ res.status(200).json({ message: 'Not implemented' }); });
     app.get('/Items/:itemId/Ancestors', (req, res) => { /* GetAncestors */ res.status(200).json({ message: 'Not implemented' }); });
@@ -3176,7 +3319,8 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         const serverId = sys?.id || "hmss-local";
         const userId = req.user.id;
         const limit = parseInt(req.query.Limit || req.query.limit) || 12;
-        const includeItemTypes = (req.query.IncludeItemTypes || req.query.includeItemTypes || "Episode,Movie").split(",").map(t => t.trim());
+        const includeItemTypesRaw = req.query.IncludeItemTypes ?? req.query.includeItemTypes ?? "Episode,Movie";
+        const includeItemTypes = (Array.isArray(includeItemTypesRaw) ? includeItemTypesRaw : String(includeItemTypesRaw).split(",")).map(t => String(t).trim());
         const rows = getResumableItems(db, userId, "Video", limit * 3);
         const index = globalThis.__mediaIndex || { shows: [], movies: [], music: [], unsorted: [] };
         const items = [];
@@ -3634,7 +3778,8 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         const config = getLiveTvConfig(db);
         var provider = (config.ListingProviders || [])[0];
         if (!provider) return res.json({ Items: [], TotalRecordCount: 0, StartIndex: 0 });
-        var requestedIds = (req.query.ChannelIds || req.query.channelIds || "").split(",").filter(Boolean);
+        var requestedIdsRaw = req.query.ChannelIds ?? req.query.channelIds ?? "";
+        var requestedIds = (Array.isArray(requestedIdsRaw) ? requestedIdsRaw : String(requestedIdsRaw).split(",")).map(String).filter(Boolean);
         var maxStart = req.query.MaxStartDate ? new Date(req.query.MaxStartDate).getTime() : Infinity;
         var minEnd = req.query.MinEndDate ? new Date(req.query.MinEndDate).getTime() : 0;
         var tvChannels = await getLiveTvChannels(db);
@@ -3651,7 +3796,8 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         const config = getLiveTvConfig(db);
         var provider = (config.ListingProviders || [])[0];
         var body = req.body || {};
-        var requestedIds = body.channelIds ? body.channelIds.split(",").filter(Boolean) : [];
+        var bodyChannelIds = body.channelIds;
+        var requestedIds = (Array.isArray(bodyChannelIds) ? bodyChannelIds : bodyChannelIds ? String(bodyChannelIds).split(",") : []).map(String).filter(Boolean);
         var maxStart = body.MaxStartDate ? new Date(body.MaxStartDate).getTime() : Infinity;
         var minEnd = body.MinEndDate ? new Date(body.MinEndDate).getTime() : 0;
         var tvChannels = await getLiveTvChannels(db);
@@ -3992,40 +4138,6 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         return { found, itemPath, itemType, probe };
     }
 
-    function buildMediaSource(found, itemPath, id, probe, itemType, disableDirectPlay = false, audioStreamIndex, appendAudioToTranscodeUrl = false) {
-        if (!probe) return null;
-        const isVideo = itemType === "Episode" || itemType === "Movie" || itemType === "Video";
-        var transcodeUrl = `/Videos/${id}/hls/master.m3u8`;
-        if (appendAudioToTranscodeUrl && audioStreamIndex != null) transcodeUrl += "?AudioStreamIndex=" + audioStreamIndex;
-        var defaultAudioIdx = audioStreamIndex != null ? audioStreamIndex : (probe.streams.findIndex(s => s.Type === "Audio") >= 0 ? probe.streams.findIndex(s => s.Type === "Audio") : null);
-        return {
-            Protocol: "File",
-            Id: id,
-            Path: itemPath,
-            Type: "Default",
-            Container: probe.container,
-            Size: probe.size,
-            Name: found.title || "Unknown",
-            SortName: (found.title || "unknown").toLowerCase(),
-            IsRemote: false,
-            RunTimeTicks: Math.round(probe.duration * 10000000),
-            SupportsTranscoding: true,
-            SupportsDirectStream: !disableDirectPlay,
-            SupportsDirectPlay: !disableDirectPlay,
-            DirectPlayUrl: disableDirectPlay ? null : `/Videos/${id}/stream?static=true&api_key=`,
-            DirectStreamUrl: disableDirectPlay ? null : `/Videos/${id}/stream`,
-            TranscodingUrl: transcodeUrl,
-            HlsUrl: transcodeUrl,
-            VideoType: isVideo ? "VideoFile" : undefined,
-            MediaStreams: probe.streams,
-            Bitrate: probe.bitrate,
-            DefaultAudioStreamIndex: defaultAudioIdx,
-            HasSegments: false,
-            ETag: id,
-            PlaySessionId: crypto.randomUUID(),
-        };
-    }
-
     function buildLiveTvMediaSource(tvChannel, audioStreamIndex) {
         const ch = tvChannel.MediaSources[0];
         const liveStreamId = crypto.createHash("md5").update(ch.Id + Date.now()).digest("hex");
@@ -4068,6 +4180,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
                     IsDefault: true,
                     IsForced: false,
                     IsHearingImpaired: false,
+                    IsOriginal: false,
                     Height: 0,
                     Width: 0,
                     AverageFrameRate: 0,
@@ -4104,6 +4217,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
                     IsDefault: true,
                     IsForced: false,
                     IsHearingImpaired: false,
+                    IsOriginal: false,
                     Profile: "LC",
                     Type: "Audio",
                     Index: -1,
@@ -4506,7 +4620,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
                 SeasonId: seasonId || generateItemId(`${showName}-s${ep.season}`),
                 IndexNumber: ep.episode,
                 ParentIndexNumber: ep.season,
-                Number: String(ep.episode || ""),
+                Number: ep.episode ?? null,
                 VideoType: "VideoFile",
                 UserData: {
                     PlaybackPositionTicks: 0,
@@ -4724,7 +4838,7 @@ export async function jellyfinRoutes(app, getDb, apiVersion, mediaDirs, port = {
         res.json({
             Name: user.Username,
             ServerId: getSystemInfo(db)?.id || "hmss-local",
-            Id: user.Id.replace(/-/g, ""),
+            Id: user.Id,
             HasPassword: Boolean(user.Password),
             HasConfiguredPassword: Boolean(user.Password),
             HasConfiguredAutoLogin: false,

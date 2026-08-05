@@ -50,6 +50,66 @@ function showToast(text, isError) {
     }, 3300);
 }
 
+// --- i18n: reuse Jellyfin web's translation files ({lang}-json.*.chunk.js) ---
+// Language is picked automatically: Jellyfin's own display-language setting,
+// then the <html data-culture> attribute, then the browser language.
+var _hmssDict = {};
+
+function _hmssT(key, fallback) {
+    if (_hmssDict[key] != null) return _hmssDict[key];
+    return fallback != null ? fallback : key;
+}
+
+function detectCulture() {
+    var c;
+    try { c = localStorage.getItem("displaylanguage"); } catch (e) { }
+    if (c) return c;
+    var el = document.documentElement;
+    if (el && el.getAttribute) {
+        c = el.getAttribute("data-culture");
+        if (c) return c;
+    }
+    if (navigator.language) return navigator.language;
+    if (navigator.userLanguage) return navigator.userLanguage;
+    if (navigator.languages && navigator.languages.length) return navigator.languages[0];
+    return "en-us";
+}
+
+function matchLangFile(list, culture) {
+    var c = String(culture || "en-us").toLowerCase().replace(/_/g, "-");
+    if (!list || !list.length) return null;
+    var exact = list.filter(function (x) { return x.lang === c; });
+    if (exact.length) return exact[0];
+    var parts = c.split("-");
+    while (parts.length > 0) {
+        var p = parts.join("-");
+        var hit = list.filter(function (x) { return x.lang === p; });
+        if (hit.length) return hit[0];
+        var pref = list.filter(function (x) { return x.lang.indexOf(p + "-") === 0; });
+        if (pref.length) return pref[0];
+        parts.pop();
+    }
+    var fallback = list.filter(function (x) { return x.lang === "en-us"; });
+    return fallback.length ? fallback[0] : list[0];
+}
+
+async function loadTranslations() {
+    try {
+        var resp = await fetch("/api/hmss/translations");
+        if (!resp.ok) return;
+        var list = await resp.json();
+        var file = matchLangFile(list, detectCulture());
+        if (!file) return;
+        var chunk = await (await fetch(file.url)).text();
+        var m = chunk.match(/JSON\.parse\(\s*'((?:\\.|[^'\\])*)'\s*\)/);
+        if (!m) return;
+        _hmssDict = JSON.parse(m[1].replace(/\\(.)/g, function (_, ch) { return ch; }));
+        console.log("HMSS: i18n loaded (" + file.lang + ", " + Object.keys(_hmssDict).length + " strings)");
+    } catch (e) {
+        console.warn("HMSS: i18n load failed:", e);
+    }
+}
+
 // Global HMSS API for addon persistent scripts
 window.HMSS = {
     showToast: showToast,
@@ -59,7 +119,12 @@ window.HMSS = {
         if (entry && entry.label && typeof entry.action === "function") {
             _hmssFeatureItems.push(entry);
         }
-    }
+    },
+    t: _hmssT,
+    getTranslations: function () {
+        return _hmssDict;
+    },
+    i18nReady: null
 };
 
 // --- Login splash background fix ---
@@ -341,18 +406,58 @@ function injectPersistentScripts() {
     });
 }
 
+async function renderHtmlInFallback(html) {
+    const fallbackPage = document.getElementById("fallbackPage");
+    if (!fallbackPage) return;
+    fallbackPage.innerHTML = html;
+
+    fallbackPage.querySelectorAll("script").forEach(function (old) {
+        const s = document.createElement("script");
+        s.textContent = old.textContent;
+        old.replaceWith(s);
+    });
+}
+
+// Jellyfin renders its "Page Not Found" fallback into #fallbackPage (the only
+// component that uses that id). If none of our addon pages is attached to the
+// route, we swap in our own web/hmss/hmss-404.html instead.
+var _hmss404Hash = null;
+var _hmss404Attempt = 0;
+
 async function loadHMSSPage() {
     const hash = window.location.hash;
     const hashPath = hash.split("?")[0];
     const menuItem = _hmssRoutes.find(item => item.link === hashPath);
-    if (!menuItem) { _hmssPageLoaded = null; return; }
-
     const fallbackPage = document.getElementById("fallbackPage");
+
+    if (!menuItem) {
+        _hmssPageLoaded = null;
+        if (!fallbackPage) {
+            _hmss404Hash = null;
+            return;
+        }
+        if (_hmss404Hash === hash && fallbackPage.dataset.hmss404) return;
+        const now = Date.now();
+        if (_hmss404Hash === hash && now - _hmss404Attempt < 2000) return;
+        _hmss404Hash = hash;
+        _hmss404Attempt = now;
+        try {
+            const response = await fetch("/web/hmss/hmss-404.html");
+            if (!response.ok) throw new Error("Failed to load: " + response.status);
+            renderHtmlInFallback(await response.text());
+            fallbackPage.dataset.hmss404 = "1";
+        } catch (error) {
+            console.error("HMSS 404 load failed:", error);
+        }
+        return;
+    }
+
     const pageTitle = document.querySelector(".pageTitle");
     if (!fallbackPage) return;
 
     if (_hmssPageLoaded === hash) return;
     _hmssPageLoaded = hash;
+    _hmss404Hash = null;
 
     console.log("Loading HMSS page:", menuItem.title);
 
@@ -363,16 +468,9 @@ async function loadHMSSPage() {
         if (!response.ok) throw new Error("Failed to load: " + response.status);
 
         document.title = "HMSS - " + menuItem.title;
-        pageTitle.textContent = menuItem.title;
-        const html = await response.text();
-        fallbackPage.innerHTML = html;
+        if (pageTitle) pageTitle.textContent = menuItem.title;
+        renderHtmlInFallback(await response.text());
         fallbackPage.id = "";
-
-        fallbackPage.querySelectorAll("script").forEach(function (old) {
-            const s = document.createElement("script");
-            s.textContent = old.textContent;
-            old.replaceWith(s);
-        });
 
     } catch (error) {
         console.error("HMSS Page load failed:", error);
@@ -381,6 +479,8 @@ async function loadHMSSPage() {
 }
 
 async function bootHMSS() {
+    window.HMSS.i18nReady = loadTranslations();
+
     try {
         const resp = await fetch("/api/addons/ui");
         if (resp.ok) {

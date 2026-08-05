@@ -57,6 +57,9 @@ export const DefaultUserPolicy = {
     IsAdministrator: false,
     IsHidden: false,
     IsDisabled: false,
+    AuthenticationProviderId: "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
+    PasswordResetProviderId: "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
+    InvalidLoginAttemptCount: 0,
     EnableSharedDeviceControl: true,
     EnableRemoteAccess: true,
     EnableLiveTvManagement: false,
@@ -653,6 +656,9 @@ export function getUserPolicy(db, userId) {
     policy.MaxActiveSessions = user.MaxActiveSessions || 0;
     policy.EnableUserPreferenceAccess = user.EnableUserPreferenceAccess === null ? true : Boolean(user.EnableUserPreferenceAccess);
     policy.SyncPlayAccess = intToSyncPlay(user.SyncPlayAccess);
+    if (user.AuthenticationProviderId) policy.AuthenticationProviderId = user.AuthenticationProviderId;
+    if (user.PasswordResetProviderId) policy.PasswordResetProviderId = user.PasswordResetProviderId;
+    if (user.InvalidLoginAttemptCount != null) policy.InvalidLoginAttemptCount = user.InvalidLoginAttemptCount;
 
     return policy;
 }

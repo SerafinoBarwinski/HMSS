@@ -6,7 +6,14 @@ export function readMeta(dir) {
     for (const f of files) {
         const fp = `${dir}/${f}`;
         if (existsSync(fp)) {
-            try { return parse(readFileSync(fp, "utf-8")); } catch {}
+            try {
+                const data = parse(readFileSync(fp, "utf-8"));
+                if (data) {
+                    if (data.year != null && data.year !== "") data.year = Number(data.year);
+                    if (data.community_rating != null && data.community_rating !== "") data.community_rating = Number(data.community_rating);
+                }
+                return data;
+            } catch {}
         }
     }
     return null;
